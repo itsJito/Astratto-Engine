@@ -41,7 +41,9 @@ Engine::Engine(const astratto_config& cfg) : config_(cfg), pool_(extraThreads(cf
 }
 
 Engine::~Engine() {
-    // services first: they hold handles into the worlds (and modules hold the services); the last made goes first
+    // modules first, while every service is still whole: a module's shutdown may still write commands
+    if (ModuleHost* m = service<ModuleHost>()) m->unloadAll();
+    // then the services: they hold handles into the worlds (and modules hold the services); the last made goes first
     while (!services_.empty()) services_.pop_back();
 }
 

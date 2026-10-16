@@ -595,9 +595,9 @@ void SydneyCharacter::motors() {
         const float len = std::sqrt(cx * cx + cy * cy + cz * cz);
         if (len < 1e-5f) continue;
         const float ux = cx / len, uy = cy / len, uz = cz / len;
-        const float* t = goal.dir[j];
+        const float* want = goal.dir[j];
         frame(j, fr);
-        float wx = fr[0] * t[0] + fr[3] * t[1] - fr[6] * t[2], wy = fr[1] * t[0] + fr[4] * t[1] - fr[7] * t[2], wz = fr[2] * t[0] + fr[5] * t[1] - fr[8] * t[2];
+        float wx = fr[0] * want[0] + fr[3] * want[1] - fr[6] * want[2], wy = fr[1] * want[0] + fr[4] * want[1] - fr[7] * want[2], wz = fr[2] * want[0] + fr[5] * want[1] - fr[8] * want[2];
         const float wl = std::sqrt(wx * wx + wy * wy + wz * wz);
         if (wl < 1e-5f) continue;
         wx /= wl; wy /= wl; wz /= wl;

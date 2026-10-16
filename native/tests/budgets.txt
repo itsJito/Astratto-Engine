@@ -1,0 +1,16 @@
+# Astratto Engine - what the benchmark (astratto_bench) may take, in milliseconds, at most: the median of its runs.
+# A measure over its budget fails the run, as a failed check does.
+#
+# The budgets are set from what a frame can afford, with room for slower machines (shared CI runners among them):
+# each is two to four times what a 6-thread desktop of 2018 (GTX 1050 Ti class) measures. Lower one when the engine
+# is made faster, so that the gain is kept; raise one only with a reason written beside it.
+#
+# measure                 budget   (measured there, median)
+light_world               250      # ~65    a whole 256 x 64 x 256 world lit from nothing (a load, not a frame)
+block_set_relight         4        # ~1.2   one block set in play that changes the light round it
+mesh_world                700      # ~200   all 256 columns, one thread (a load; in play a few columns, on every worker)
+paths_128_one_thread      24       # ~6     a busy frame's route searches
+paths_128_workers         24       # ~5
+movers_500_frame          2        # ~0.3   a crowd's frame of physics
+empty_frame               0.05     # ~0.001 the fixed cost of a tick
+mix_64_voices_1s          200      # ~45    one second of 64 positional voices: real time needs well under 1000

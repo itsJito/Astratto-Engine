@@ -115,7 +115,9 @@ told by a fact, it routes through the gap, sees, approaches and arrives) and `In
 
 Motion commands (`MOVER_INPUT`, `RAGDOLL_HIT`, `VEHICLE_INPUT`, ...), pose snapshots, collision events (`LANDED`,
 `VEHICLE_IMPACT`, `BLOCK_HIT`, `RAGDOLL_STATE`) and audio cues (`VOICE_PLAY`, `LISTENER`) cross the interface. Held by
-the native self-test (65 checks: physics, Sydney, cars, AI, audio, modules, handles) and `IntegrationTest`.
+the native self-test (75 checks: physics, Sydney, cars, AI, audio, modules, handles, and the hardening checks - large
+route searches, the same frames on one thread and on several, command streams of noise, handle churn, modules that
+release themselves) and `IntegrationTest`.
 
 ### 6. Gameplay in Java or C++
 
@@ -158,7 +160,7 @@ of returning null, so nothing passes on a Java path.
 
 | What | State |
 |---|---|
-| Other platforms | The core is written for them (platform code is behind `_WIN32` / POSIX: module loading, the audio device) and `CMakeLists.txt` builds it, but it has only been built and run on Windows x64 with MSVC. Linux and macOS builds are unverified; off Windows the audio device is the null device (audio is mixed on request). |
+| Other platforms | The core is written for them (platform code is behind `_WIN32` / POSIX: module loading, the audio device) and `CMakeLists.txt` builds it. CI builds and runs the self-test, sanitizers, benchmark and Java tests on Linux x64 and macOS arm64 for every push; until those jobs have passed, treat those platforms as unverified. Off Windows the audio device is the null device (audio is mixed on request). |
 | Absentialis on the native services | Absentialis uses the native world (owned by the engine), routes, sight and meshing, and - with `ABS_NATIVE_RENDER=1` - the native renderer. Its characters, ragdolls, cars, AI and audio still run on its Java implementations (now in `astratto.ai`, `astratto.audio` and the game's own packages); moving the game onto the native services is the game's work, not the engine's. The native renderer is not yet the game's default because a world that is not linked to the engine (the hideout preview) is still drawn by the game's Java renderer. |
 | Java GL code in the engine | `astratto.render` (Batch2D, Font, ModelRenderer, Shader, Screenshot) and the GL paths of Foliage, Decals and Props remain for Absentialis's Java renderer. The engine's own renderer and the starter game use none of them; they go when the game stops using its Java renderer, and `lwjgl-opengl` with them. |
 | Pixel parity | The native renderer was moved pass for pass; frames compared by eye and by mean difference in play (the `car` scenario), not gated pixel for pixel. |

@@ -94,8 +94,8 @@ bool VoxelWorld::setColumn(int x, int z, const uint8_t* cells) {
 }
 
 void VoxelWorld::clear() {
-    std::fill(blocks_.begin(), blocks_.end(), 0);
-    std::fill(light_.begin(), light_.end(), 0);
+    std::fill(blocks_.begin(), blocks_.end(), uint8_t{0});
+    std::fill(light_.begin(), light_.end(), uint8_t{0});
     sealed_.clear();
     edits_++; navVersion_++; lightVersion_++;
     markAllDirty();

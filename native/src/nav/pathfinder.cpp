@@ -75,7 +75,10 @@ int Pathfinder::find(int k, bool create) {
 }
 
 void Pathfinder::push(int n) {
+    // a node is pushed again each time a cheaper way to it is found (the stale entry is skipped when popped), so the
+    // heap can hold more entries than there are nodes: it grows rather than writing past its end
     int i = ++heapN_;
+    if (static_cast<size_t>(i) >= heap_.size()) heap_.resize(heap_.size() * 2);
     heap_[i] = n;
     while (i > 1 && nf_[heap_[i >> 1]] > nf_[heap_[i]]) { const int t = heap_[i]; heap_[i] = heap_[i >> 1]; heap_[i >> 1] = t; i >>= 1; }
 }

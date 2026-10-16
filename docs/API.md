@@ -88,6 +88,12 @@ through `host->command`, reads snapshots and the world view through the host, an
 comes back to the caller as `EVT_MODULE_LOG`). Load it with `astratto_module_load` (Java: `Game.loadNative`); release
 its handle to shut it down.
 
+A module may release itself, or another module, from inside any of its own functions (`RELEASE` through
+`host->command`): the released module is called no more, and is shut down and unloaded once the module code running at
+the time has returned - never while its own code is still on the stack. A release asked from inside a module's own
+`shutdown` is refused (an `EVT_ERROR`), not run twice. Nothing the engine throws crosses back into a module: a host
+function that fails returns its status (`ASTRATTO_ERR_MEMORY`, `ASTRATTO_ERR_INTERNAL`) instead.
+
 ## 5. Rendering
 
 ```java
@@ -138,3 +144,21 @@ The shaders are the files in `shaders/`, bundled in the jar and handed to the re
 `astratto/natives/<os>-<arch>/`, and the Java side extracts and loads the one for the machine it runs on. A jar that
 should run on several platforms is built by running `buildNative` on each and copying the `native/bin/*` folders
 together before `build`. `ASTRATTO_NATIVE=<file or dir>` points the Java side at a library explicitly.
+
+## 8. Quality gates
+
+| Gate | Windows | Elsewhere (CMake) |
+|---|---|---|
+| Warnings are errors | always (`/W4 /WX`) | `-DASTRATTO_WERROR=ON` |
+| Self-test (75 checks, `hardening.cpp` among them) | `native\build.bat` | `astratto_selftest` |
+| Bounds-checked self-test (debug runtime, checked containers and heap) | `native\build.bat checked` | - |
+| Sanitizers (ASan; and UBSan with GCC and Clang) | `native\build.bat asan` (needs the "C++ AddressSanitizer" component) | `-DASTRATTO_SANITIZE=ON` |
+| Benchmark held to budgets | `native\build.bat bench` | `astratto_bench native/tests/budgets.txt [results.json]` |
+| Java tests, fallbacks off | `./gradlew test` | `./gradlew test` |
+
+The benchmark (`native/tests/bench.cpp`) times lighting, runtime relighting, meshing, route searches, a crowd's
+physics, the empty tick and the mixer on fixed worlds and seeds, and fails when a median goes over its line in
+`native/tests/budgets.txt`; it also prints a digest of every byte the mesher made, so an optimisation can be shown to
+change nothing. `.github/workflows/ci.yml` runs every gate on Windows, Linux and macOS for each push and pull request,
+and keeps each run's benchmark results. A machine with no GPU sets `ASTRATTO_HEADLESS=1`, and the one test that needs
+an OpenGL 4.5 context is reported skipped rather than passed.

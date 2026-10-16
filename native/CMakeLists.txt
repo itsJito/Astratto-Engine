@@ -29,6 +29,19 @@ if(NOT ASTRATTO_PLATFORM)
 endif()
 set(ASTRATTO_OUT "${CMAKE_CURRENT_SOURCE_DIR}/bin/${ASTRATTO_PLATFORM}")
 
+# quality gates: warnings as errors, and the sanitizers (address and undefined behaviour with GCC and Clang, address
+# with MSVC) for a checking build of everything - give it its own ASTRATTO_PLATFORM, e.g. linux-x64-asan
+option(ASTRATTO_WERROR "treat compiler warnings as errors" OFF)
+option(ASTRATTO_SANITIZE "build with AddressSanitizer (and UBSan where the compiler has it)" OFF)
+if(ASTRATTO_SANITIZE)
+    if(MSVC)
+        add_compile_options(/fsanitize=address /Zi)
+    else()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined -g)
+        add_link_options(-fsanitize=address,undefined)
+    endif()
+endif()
+
 # every .cpp under src/ is part of the library
 file(GLOB_RECURSE ASTRATTO_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 add_library(astratto SHARED ${ASTRATTO_SOURCES})
@@ -48,24 +61,34 @@ endif()
 
 if(MSVC)
     # route costs are compared with a reference search for equality of outcome: precise floats, no contraction
-    target_compile_options(astratto PRIVATE /W4 /wd4324 /fp:precise /utf-8)
+    target_compile_options(astratto PRIVATE /W4 /wd4324 /fp:precise /utf-8 $<$<BOOL:${ASTRATTO_WERROR}>:/WX>)
 else()
-    target_compile_options(astratto PRIVATE -Wall -Wextra -ffp-contract=off)
+    target_compile_options(astratto PRIVATE -Wall -Wextra -ffp-contract=off $<$<BOOL:${ASTRATTO_WERROR}>:-Werror>)
 endif()
 
-add_executable(astratto_selftest tests/selftest.cpp tests/services.cpp)
+add_executable(astratto_selftest tests/selftest.cpp tests/services.cpp tests/hardening.cpp)
 target_link_libraries(astratto_selftest PRIVATE astratto)
+
+# the module the self-test loads to show that a module may release itself from inside its own code (not for games)
+add_library(astratto_test_module SHARED tests/test_module.cpp)
+target_include_directories(astratto_test_module PRIVATE include)
+
+# the benchmark: times the core's hot paths and holds them to tests/budgets.txt
+add_executable(astratto_bench tests/bench.cpp)
+target_link_libraries(astratto_bench PRIVATE astratto)
 
 # the example gameplay module a game can copy: a library the engine loads (include/astratto/astratto_module.h)
 add_library(astratto_example_module SHARED modules/example/example_module.cpp)
 target_include_directories(astratto_example_module PRIVATE include)
-if(WIN32)
-    set_target_properties(astratto_example_module PROPERTIES PREFIX "")
-else()
-    set_target_properties(astratto_example_module PROPERTIES PREFIX "lib")
-endif()
+foreach(t astratto_example_module astratto_test_module)
+    if(WIN32)
+        set_target_properties(${t} PROPERTIES PREFIX "")
+    else()
+        set_target_properties(${t} PROPERTIES PREFIX "lib")
+    endif()
+endforeach()
 
-foreach(t astratto astratto_selftest astratto_example_module)
+foreach(t astratto astratto_selftest astratto_example_module astratto_test_module astratto_bench)
     set_target_properties(${t} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${ASTRATTO_OUT}" LIBRARY_OUTPUT_DIRECTORY "${ASTRATTO_OUT}"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ASTRATTO_OUT}" LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ASTRATTO_OUT}"
@@ -73,11 +96,14 @@ foreach(t astratto astratto_selftest astratto_example_module)
 endforeach()
 if(NOT WIN32)
     # the self-test finds its library beside itself
-    set_target_properties(astratto_selftest PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
-    if(APPLE)
-        set_target_properties(astratto_selftest PROPERTIES BUILD_RPATH "@loader_path")
-    endif()
+    foreach(t astratto_selftest astratto_bench)
+        set_target_properties(${t} PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+        if(APPLE)
+            set_target_properties(${t} PROPERTIES BUILD_RPATH "@loader_path")
+        endif()
+    endforeach()
 endif()
 
 enable_testing()
 add_test(NAME astratto_selftest COMMAND astratto_selftest WORKING_DIRECTORY "${ASTRATTO_OUT}")
+add_test(NAME astratto_bench COMMAND astratto_bench "${CMAKE_CURRENT_SOURCE_DIR}/tests/budgets.txt" WORKING_DIRECTORY "${ASTRATTO_OUT}")

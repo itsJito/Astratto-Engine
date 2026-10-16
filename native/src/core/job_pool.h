@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -45,9 +46,16 @@ public:
         }
         wake_.notify_all();
         drain(0);
-        std::unique_lock<std::mutex> lock(mutex_);
-        done_.wait(lock, [this] { return active_ == 0; });
-        fn_ = nullptr;
+        std::exception_ptr failure;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            done_.wait(lock, [this] { return active_ == 0; });
+            fn_ = nullptr;
+            failure = failure_;
+            failure_ = nullptr;
+        }
+        // every worker has left the batch before anything it threw goes on up the caller's thread (out of memory, say)
+        if (failure) std::rethrow_exception(failure);
     }
 
 private:
@@ -55,7 +63,15 @@ private:
         for (;;) {
             const size_t i = next_.fetch_add(1);
             if (i >= count_) return;
-            (*fn_)(i, worker);
+            try { (*fn_)(i, worker); }
+            catch (...) {
+                // a throw must not leave a worker's thread (that ends the process): the first is kept for the caller,
+                // and the rest of the batch is abandoned
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!failure_) failure_ = std::current_exception();
+                next_.store(count_);
+                return;
+            }
         }
     }
 
@@ -86,6 +102,7 @@ private:
     unsigned active_ = 0;
     unsigned long long batch_ = 0;
     bool quit_ = false;
+    std::exception_ptr failure_;
 };
 
 }  // namespace astratto

@@ -271,15 +271,15 @@ void Ragdoll::collide(const VoxelWorld* w, int i) {
     grounded[i] = false;
     if (w == nullptr) return;
     int ix = fl(x[i]), iz = fl(z[i]);
-    const int fy = fl(y[i] - r);
-    if (solid(w, ix, fy, iz)) {
-        if (!solid(w, ix, fy + 1, iz)) {
-            load_[i] += static_cast<float>(fy + 1) + r - y[i];
-            y[i] = static_cast<float>(fy + 1) + r; grounded[i] = true;
+    const int footY = fl(y[i] - r);
+    if (solid(w, ix, footY, iz)) {
+        if (!solid(w, ix, footY + 1, iz)) {
+            load_[i] += static_cast<float>(footY + 1) + r - y[i];
+            y[i] = static_cast<float>(footY + 1) + r; grounded[i] = true;
             friction(i);
         } else {
             x[i] = px[i]; z[i] = pz[i];
-            if (solid(w, fl(x[i]), fy, fl(z[i])) && solid(w, fl(x[i]), fy + 1, fl(z[i]))) y[i] = py[i];
+            if (solid(w, fl(x[i]), footY, fl(z[i])) && solid(w, fl(x[i]), footY + 1, fl(z[i]))) y[i] = py[i];
         }
         ix = fl(x[i]); iz = fl(z[i]);
     } else if (solid(w, ix, fl(y[i] - r - 0.02f), iz)) { grounded[i] = true; friction(i); }

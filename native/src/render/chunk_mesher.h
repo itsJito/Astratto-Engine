@@ -38,6 +38,8 @@ private:
     std::vector<Shape> shapes_;
     std::vector<int8_t> boxes_;          // 8 bytes a box: x0 y0 z0 x1 y1 z1 tex pad
     uint32_t below_ = 0;
+    bool cube_[256] = {}, hides_[256] = {};
+    std::vector<uint8_t> faces_;         // per cell of the column being meshed: which of its six faces may show
     std::vector<uint64_t> mask_;
     std::vector<uint8_t> opaque_, translucent_;
 

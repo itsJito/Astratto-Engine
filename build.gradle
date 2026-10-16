@@ -89,7 +89,8 @@ tasks.register('buildNative', Exec) {
 def engineResources = tasks.register('engineResources', Sync) {
     from('shaders') { into 'astratto/shaders' }
     from('resources') { into 'astratto/resources' }
-    from("native/bin/$astrattoPlatform") { into "astratto/natives/$astrattoPlatform"; include '*.dll', '*.so', '*.dylib' }
+    // (not the module the native self-test loads: it is for that test alone)
+    from("native/bin/$astrattoPlatform") { into "astratto/natives/$astrattoPlatform"; include '*.dll', '*.so', '*.dylib'; exclude '*astratto_test_module*' }
     from('NOTICE.md') { into 'astratto' }
     from('LICENSE.md') { into 'astratto' }
     into layout.buildDirectory.dir('generated/engine-resources')
@@ -107,7 +108,7 @@ tasks.named('test') {
     // the acceptance rule: everything the engine provides is native, with no Java fallback to hide behind
     environment 'ASTRATTO_JAVA_FALLBACK', '0'
     jvmArgs '--enable-native-access=ALL-UNNAMED'
-    testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = false }
+    testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat = 'full'; showStandardStreams = false }
 }
 
 // ------------------------------------------------------------------ acceptance: the engine on its own

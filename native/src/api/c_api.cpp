@@ -17,6 +17,20 @@
 
 using astratto::Engine;
 
+#if defined(_MSC_VER) && defined(_DEBUG)
+#  include <crtdbg.h>
+#  include <cstdlib>
+namespace {
+// a checked build (build.bat checked) has its own debug runtime: what it finds is written out and ends the process,
+// rather than waiting on a dialog nobody will answer on a build machine
+const bool checkedReports = [] {
+    for (int kind : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) { _CrtSetReportMode(kind, _CRTDBG_MODE_FILE); _CrtSetReportFile(kind, _CRTDBG_FILE_STDERR); }
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    return true;
+}();
+}  // namespace
+#endif
+
 // The layouts the other side of the bridge writes by hand: if one of these moves, so must every binding (and
 // astratto_layout below tells a binding the sizes, so that it can check itself when it loads).
 static_assert(sizeof(astratto_record) == 8, "record header");
@@ -194,8 +208,8 @@ int32_t astratto_world_edit(astratto_engine* engine, astratto_handle world, cons
 }
 
 int32_t astratto_world_set(astratto_engine* engine, astratto_handle world, int32_t x, int32_t y, int32_t z, uint32_t block) {
-    if (engine == nullptr) return ASTRATTO_ERR_ARGUMENT;
-    return engine->impl.setCell(world, x, y, z, block);     // nothing in it can throw: no guard on the hottest call
+    // the hottest call, but a set that relights can allocate: guarded like the rest (a try costs nothing until it throws)
+    return guarded(engine, [&](Engine& e) { return e.setCell(world, x, y, z, block); });
 }
 
 int32_t astratto_frame(astratto_engine* engine, astratto_frame_io* io) {

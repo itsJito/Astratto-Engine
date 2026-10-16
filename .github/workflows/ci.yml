@@ -1,0 +1,128 @@
+# Astratto Engine - the quality gates, on every push and pull request. A change is good when every required job is
+# green: the native core builds without a warning, its self-test passes (plainly, bounds-checked and under the
+# sanitizers), the benchmark stays inside tests/budgets.txt, and the Java tests pass with the Java fallbacks off.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: native core, warnings as errors, and its self-test
+        shell: cmd
+        run: native\build.bat
+      - name: benchmark against the budgets
+        shell: cmd
+        run: native\bin\windows-x64\astratto_bench.exe native\tests\budgets.txt bench-windows-x64.json
+      - name: self-test, bounds-checked (debug runtime)
+        shell: cmd
+        run: native\build.bat checked
+      - name: self-test under AddressSanitizer
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.ASAN -property installationPath
+          if (-not $vs) { Write-Output "::warning::this runner's Visual Studio has no AddressSanitizer component: the ASan self-test did not run"; exit 0 }
+          cmd /c native\build.bat asan
+          exit $LASTEXITCODE
+      - name: Java tests (no GPU here, so the one renderer test is reported skipped)
+        env: { ASTRATTO_HEADLESS: '1' }
+        shell: cmd
+        run: gradlew.bat test --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-results
+          path: |
+            bench-windows-x64.json
+            build/reports/tests/
+          if-no-files-found: ignore
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: native core, warnings as errors, and its self-test
+        run: |
+          cmake -S native -B native/build-linux-x64 -DCMAKE_BUILD_TYPE=Release -DASTRATTO_PLATFORM=linux-x64 -DASTRATTO_WERROR=ON
+          cmake --build native/build-linux-x64 --config Release --parallel
+          native/bin/linux-x64/astratto_selftest
+      - name: benchmark against the budgets
+        run: native/bin/linux-x64/astratto_bench native/tests/budgets.txt bench-linux-x64.json
+      - name: self-test under AddressSanitizer and UBSan
+        run: |
+          cmake -S native -B native/build-linux-x64-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTRATTO_PLATFORM=linux-x64-asan -DASTRATTO_SANITIZE=ON
+          cmake --build native/build-linux-x64-asan --parallel
+          native/bin/linux-x64-asan/astratto_selftest
+      - name: Java tests (no GPU here, so the one renderer test is reported skipped)
+        env: { ASTRATTO_HEADLESS: '1' }
+        run: ./gradlew test --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-results
+          path: |
+            bench-linux-x64.json
+            build/reports/tests/
+          if-no-files-found: ignore
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: native core, warnings as errors, and its self-test
+        run: |
+          cmake -S native -B native/build-macos-arm64 -DCMAKE_BUILD_TYPE=Release -DASTRATTO_PLATFORM=macos-arm64 -DASTRATTO_WERROR=ON
+          cmake --build native/build-macos-arm64 --config Release --parallel
+          native/bin/macos-arm64/astratto_selftest
+      - name: benchmark against the budgets
+        run: native/bin/macos-arm64/astratto_bench native/tests/budgets.txt bench-macos-arm64.json
+      - name: self-test under AddressSanitizer and UBSan
+        run: |
+          cmake -S native -B native/build-macos-arm64-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASTRATTO_PLATFORM=macos-arm64-asan -DASTRATTO_SANITIZE=ON
+          cmake --build native/build-macos-arm64-asan --parallel
+          native/bin/macos-arm64-asan/astratto_selftest
+      - name: Java tests (macOS has no OpenGL 4.5, so the one renderer test is reported skipped)
+        env: { ASTRATTO_HEADLESS: '1' }
+        run: ./gradlew test --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-results
+          path: |
+            bench-macos-arm64.json
+            build/reports/tests/
+          if-no-files-found: ignore
+
+  # the renderer on a software OpenGL 4.5 (Mesa's llvmpipe, in a virtual display): the one place a build machine can
+  # draw. Advisory until it has been seen to pass - it tells, but does not stop a change.
+  renderer-software-gl:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - run: sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri mesa-utils
+      - name: Java tests, renderer included, on llvmpipe
+        env: { LIBGL_ALWAYS_SOFTWARE: '1', GALLIUM_DRIVER: llvmpipe }
+        run: |
+          xvfb-run -a -s "-screen 0 1280x720x24" glxinfo -B
+          xvfb-run -a -s "-screen 0 1280x720x24" ./gradlew test --console=plain

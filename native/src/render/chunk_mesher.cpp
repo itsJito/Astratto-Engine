@@ -4,6 +4,7 @@
 #include "render/chunk_mesher.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace astratto {
@@ -29,6 +30,11 @@ ChunkMesher::ChunkMesher(const astratto_render_table& t) {
     }
     boxes_.assign(t.boxes, t.boxes + static_cast<size_t>(t.box_count) * 8);
     below_ = t.below_floor_block;
+    // the blocks meshed as cubes, face by face: not air, not a cross of planes, not a shape of boxes
+    for (int i = 0; i < 256; i++) {
+        cube_[i] = i != 0 && !(blocks_[i].flags & ASTRATTO_RB_CROSS) && blocks_[i].shape == 0;
+        hides_[i] = (blocks_[i].flags & ASTRATTO_RB_OCCLUDES) != 0;
+    }
 }
 
 bool ChunkMesher::outside(int lx, int lz) const {
@@ -137,27 +143,54 @@ bool ChunkMesher::mesh(const astratto_mesh_io& io) {
     }
     maxY = std::min(H_ - 1, maxY + 1);
     const int size[3] = {16, maxY + 1, 16};
+    // ---- which faces could be drawn at all: a cube's face whose neighbour does not hide it (bit = the face's normal).
+    // One pass over the cells, nearly without branches; the full rules below then run only where a bit is set, so
+    // the walk over the slices no longer stalls on a guess about every cell of the column.
+    const int YN = maxY + 1;
+    faces_.resize(static_cast<size_t>(16) * 16 * YN);
+    const bool belowHides = (def(static_cast<int>(below_)).flags & ASTRATTO_RB_OCCLUDES) != 0;
+    for (int x = 0; x < 16; x++) for (int z = 0; z < 16; z++) {
+        const uint8_t* c = cells_ + static_cast<size_t>(((x + 1) * REG + (z + 1)) * H_);
+        uint8_t* f = faces_.data() + static_cast<size_t>(x * 16 + z) * YN;
+        const std::ptrdiff_t dx = static_cast<std::ptrdiff_t>(REG) * H_, dz = H_;
+        for (int y = 0; y < YN; y++) {
+            if (!cube_[c[y]]) { f[y] = 0; continue; }
+            const bool up = y + 1 >= H_ || !hides_[c[y + 1]];          // over the top of the world a face always shows
+            const bool down = y == 0 ? !belowHides : !hides_[c[y - 1]];
+            f[y] = static_cast<uint8_t>((!hides_[c[y + dx]] ? 1 : 0) | (!hides_[c[y - dx]] ? 2 : 0) | (up ? 4 : 0) | (down ? 8 : 0)
+                                        | (!hides_[c[y + dz]] ? 16 : 0) | (!hides_[c[y - dz]] ? 32 : 0));
+        }
+    }
     int p[3], q[3];
     int cs[4], cb[4], ca[4];
+    // a step of one cell along x, y and z in the column's array; and whether the column and its border are all inside the
+    // world (then nothing round a face can be beyond the world's edge)
+    const std::ptrdiff_t stride[3] = {static_cast<std::ptrdiff_t>(REG) * H_, 1, H_};
+    const bool interior = ox_ >= 1 && oz_ >= 1 && ox_ + 17 <= worldX_ && oz_ + 17 <= worldZ_;
 
     for (int a = 0; a < 3; a++) {
         const int ua = UAX[a], va = VAX[a];
         const int su = size[ua], sv = size[va];
         for (int sgn = -1; sgn <= 1; sgn += 2) {
             const int normal = a * 2 + (sgn > 0 ? 0 : 1);
+            const std::ptrdiff_t step = stride[a] * sgn;
+            const uint8_t faceBit = static_cast<uint8_t>(1u << normal);
             for (int i = 0; i < size[a]; i++) {
                 // ---- build mask
                 bool any = false;
                 for (int v = 0; v < sv; v++) for (int u = 0; u < su; u++) {
                     p[a] = i; p[ua] = u; p[va] = v;
                     const int lx = p[0], wy = p[1], lz = p[2];
-                    const int bid = id(lx, wy, lz);
                     uint64_t key = 0;
-                    if (bid != 0) {
+                    if (!(faces_[static_cast<size_t>(lx * 16 + lz) * YN + wy] & faceBit)) { mask_[static_cast<size_t>(u + v * su)] = 0; continue; }
+                    // (the cell is always in the column's array: x and z 0..15, y 0..maxY)
+                    const size_t ci = static_cast<size_t>(((lx + 1) * REG + (lz + 1)) * H_ + wy);
+                    const int bid = cells_[ci];
+                    {
                         const Block& b = def(bid);
-                        if (!(b.flags & ASTRATTO_RB_CROSS) && b.shape == 0) {
+                        {
                             const int nx = lx + AX[a][0] * sgn, ny = wy + AX[a][1] * sgn, nz = lz + AX[a][2] * sgn;
-                            const int nid = id(nx, ny, nz);
+                            const int nid = (ny >= 0 && ny < H_) ? cells_[ci + step] : id(nx, ny, nz);
                             const Block& nb = def(nid);
                             const bool nOcc = (nb.flags & ASTRATTO_RB_OCCLUDES) != 0;
                             bool vis;
@@ -172,7 +205,33 @@ bool ChunkMesher::mesh(const astratto_mesh_io& io) {
                                 if (a == 1 && sgn > 0) { layer = b.layerTop; var = b.varTop; }
                                 else if (a == 1) { layer = b.layerBottom; var = b.varBottom; }
                                 else { layer = b.layerSide; var = b.varSide; }
-                                for (int c = 0; c < 4; c++) {
+                                const bool leafy = leaf(bid);
+                                if (interior && ny >= 1 && ny + 1 < H_) {
+                                    // the common case, the same rules read straight from the column: every cell round the face
+                                    // is in the column's array and inside the world, so no lookup needs its bounds checked
+                                    const size_t ni = static_cast<size_t>(((nx + 1) * REG + (nz + 1)) * H_ + ny);
+                                    const std::ptrdiff_t su1 = stride[ua], sv1 = stride[va];
+                                    const int l0 = light_[ni];
+                                    for (int c = 0; c < 4; c++) {
+                                        const std::ptrdiff_t du = (c == 1 || c == 2) ? su1 : -su1, dv = (c >= 2) ? sv1 : -sv1;
+                                        const size_t s1 = ni + du, s2 = ni + dv, sc = s1 + dv;
+                                        const int i1 = cells_[s1], i2 = cells_[s2], ic = cells_[sc];
+                                        const bool o1 = (def(i1).flags & ASTRATTO_RB_OCCLUDES) != 0, o2 = (def(i2).flags & ASTRATTO_RB_OCCLUDES) != 0, oc = (def(ic).flags & ASTRATTO_RB_OCCLUDES) != 0;
+                                        int ao = (o1 && o2) ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0));
+                                        int leafAo = 3;
+                                        if (leafy) {
+                                            const int n3 = (o1 || leaf(i1) ? 1 : 0) + (o2 || leaf(i2) ? 1 : 0) + (oc || leaf(ic) ? 1 : 0);
+                                            leafAo = n3 >= 3 ? 1 : n3 == 2 ? 2 : n3 == 1 ? 2 : 3;
+                                            if (a == 1 && sgn < 0) leafAo = std::max(1, leafAo - 1);
+                                        }
+                                        int ss = (l0 >> 4) & 15, sb = l0 & 15, n = 1;
+                                        if (!o1) { const int l = light_[s1]; ss += (l >> 4) & 15; sb += l & 15; n++; }
+                                        if (!o2) { const int l = light_[s2]; ss += (l >> 4) & 15; sb += l & 15; n++; }
+                                        if (!oc && !(o1 && o2)) { const int l = light_[sc]; ss += (l >> 4) & 15; sb += l & 15; n++; }
+                                        if (trans || (b.flags & ASTRATTO_RB_CUTOUT)) ao = leafy ? leafAo : 3;
+                                        cs[c] = (ss + n / 2) / n; cb[c] = (sb + n / 2) / n; ca[c] = ao;
+                                    }
+                                } else for (int c = 0; c < 4; c++) {
                                     const int du = (c == 1 || c == 2) ? 1 : -1, dv = (c >= 2) ? 1 : -1;
                                     q[0] = nx; q[1] = ny; q[2] = nz;
                                     const int s1x = q[0] + (ua == 0 ? du : 0), s1y = q[1] + (ua == 1 ? du : 0), s1z = q[2] + (ua == 2 ? du : 0);
@@ -180,7 +239,6 @@ bool ChunkMesher::mesh(const astratto_mesh_io& io) {
                                     const int ccx = s1x + (va == 0 ? dv : 0), ccy = s1y + (va == 1 ? dv : 0), ccz = s1z + (va == 2 ? dv : 0);
                                     const bool o1 = opq(s1x, s1y, s1z), o2 = opq(s2x, s2y, s2z), oc = opq(ccx, ccy, ccz);
                                     int ao = (o1 && o2) ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0));
-                                    const bool leafy = leaf(bid);
                                     int leafAo = 3;
                                     if (leafy) {
                                         const int n3 = (o1 || leaf(id(s1x, s1y, s1z)) ? 1 : 0) + (o2 || leaf(id(s2x, s2y, s2z)) ? 1 : 0) + (oc || leaf(id(ccx, ccy, ccz)) ? 1 : 0);
@@ -303,7 +361,9 @@ void ChunkMesher::putVertexF(std::vector<uint8_t>& o, int fx, int fy, int fz, in
         static_cast<uint8_t>(fx >> 4), static_cast<uint8_t>(fy >> 4), static_cast<uint8_t>(fz >> 4), static_cast<uint8_t>(normal | (fz & 15) << 3),
         static_cast<uint8_t>(s), static_cast<uint8_t>(t), static_cast<uint8_t>(layer & 255), static_cast<uint8_t>(((layer >> 8) & 3) | ((var - 1) << 2) | (flags << 4)),
         static_cast<uint8_t>(sky * 17), static_cast<uint8_t>(blk * 17), static_cast<uint8_t>(255), static_cast<uint8_t>((fx & 15) | (fy & 15) << 4)};
-    o.insert(o.end(), d, d + 12);
+    const size_t at = o.size();
+    o.resize(at + 12);
+    std::memcpy(o.data() + at, d, 12);
 }
 
 void ChunkMesher::emitQuad(uint64_t k, int a, int ua, int va, int sgn, int normal, int slice, int u, int v, int wdt, int hgt) {
@@ -332,7 +392,9 @@ void ChunkMesher::putVertex(std::vector<uint8_t>& o, int x, int y, int z, int no
         static_cast<uint8_t>(x), static_cast<uint8_t>(y), static_cast<uint8_t>(z), static_cast<uint8_t>(normal),
         static_cast<uint8_t>(s), static_cast<uint8_t>(t), static_cast<uint8_t>(layer & 255), static_cast<uint8_t>(((layer >> 8) & 3) | ((var - 1) << 2) | (flags << 4)),
         static_cast<uint8_t>(sky * 17), static_cast<uint8_t>(blk * 17), static_cast<uint8_t>(ao * 85), 0};
-    o.insert(o.end(), d, d + 12);
+    const size_t at = o.size();
+    o.resize(at + 12);
+    std::memcpy(o.data() + at, d, 12);
 }
 
 void copyColumn(const VoxelWorld& w, int cx, int cz, std::vector<uint8_t>& cells, std::vector<uint8_t>& light) {

@@ -112,6 +112,9 @@ class IntegrationTest {
 
     /** The native renderer draws an engine world it meshes itself into a real window's GL 4.5 context. */
     @Test void theNativeRendererDrawsAnEngineWorld() {
+        // a build machine with no GPU says so (ASTRATTO_HEADLESS=1) and this one test is reported skipped, not passed;
+        // anywhere else a missing OpenGL 4.5 context is a failure
+        org.junit.jupiter.api.Assumptions.assumeFalse("1".equals(System.getenv("ASTRATTO_HEADLESS")), "ASTRATTO_HEADLESS=1: no GPU on this machine");
         Window win = new Window();
         win.show = false;
         win.create("astratto test", 640, 360);

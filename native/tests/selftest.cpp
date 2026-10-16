@@ -8,6 +8,11 @@
 
 #include "astratto/astratto.h"
 
+#if defined(_MSC_VER) && defined(_DEBUG)
+#  include <crtdbg.h>
+#  include <cstdlib>
+#endif
+
 namespace {
 int passed = 0, failed = 0;
 }  // namespace
@@ -107,8 +112,14 @@ bool connected(const PathAnswer& p, int sx, int sz) {
 }  // namespace
 
 void services_checks(const char* moduleDir);   // services.cpp
+void hardening_checks(const char* moduleDir);  // hardening.cpp
 
 int main(int argc, char** argv) {
+#if defined(_MSC_VER) && defined(_DEBUG)
+    // a checked build: what the debug runtime finds is written out and ends the run, rather than waiting on a dialog
+    for (int kind : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) { _CrtSetReportMode(kind, _CRTDBG_MODE_FILE); _CrtSetReportFile(kind, _CRTDBG_FILE_STDERR); }
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     std::printf("%s\n", astratto_build_info());
 
     // ------------------------------------------------------------ making an engine
@@ -290,17 +301,17 @@ int main(int argc, char** argv) {
         t.struct_size = sizeof(t); t.block_count = 4; t.blocks = rb; t.shape_count = 1; t.shapes = &none; t.below_floor_block = 3;
         astratto_mesher* m = astratto_mesher_create(&t);
         const int H = 8;
-        std::vector<uint8_t> cells(static_cast<size_t>(18 * 18 * H), 0), light(cells.size(), 0xF0);
-        cells[static_cast<size_t>(((0 + 1) * 18 + (0 + 1)) * H + 0)] = 1;    // a cube on the floor at (0, 0, 0)
-        cells[static_cast<size_t>(((5 + 1) * 18 + (5 + 1)) * H + 0)] = 2;    // a tuft of grass at (5, 0, 5)
+        std::vector<uint8_t> column(static_cast<size_t>(18 * 18 * H), 0), light(column.size(), 0xF0);
+        column[static_cast<size_t>(((0 + 1) * 18 + (0 + 1)) * H + 0)] = 1;    // a cube on the floor at (0, 0, 0)
+        column[static_cast<size_t>(((5 + 1) * 18 + (5 + 1)) * H + 0)] = 2;    // a tuft of grass at (5, 0, 5)
         astratto_mesh_io io{};
-        io.struct_size = sizeof(io); io.size_y = H; io.world_x = 64; io.world_z = 64; io.blocks = cells.data(); io.light = light.data();
+        io.struct_size = sizeof(io); io.size_y = H; io.world_x = 64; io.world_z = 64; io.blocks = column.data(); io.light = light.data();
         const bool ok = m != nullptr && astratto_mesh_column(m, &io) == ASTRATTO_OK;
         check("a mesher made from a render table meshes a column with no engine: a cube on the floor is five faces, a tuft two crossed planes seen from both sides", ok && io.opaque_bytes == (5 + 4) * 4 * 12 && io.translucent_bytes == 0);
         io.flags = ASTRATTO_MESH_NO_PLANTS;
         check("plants grown as foliage are left out when asked", m != nullptr && astratto_mesh_column(m, &io) == ASTRATTO_OK && io.opaque_bytes == 5 * 4 * 12);
-        astratto_render_table bad = t; bad.block_count = 300;
-        check("a malformed render table makes no mesher", astratto_mesher_create(&bad) == nullptr);
+        astratto_render_table badTable = t; badTable.block_count = 300;
+        check("a malformed render table makes no mesher", astratto_mesher_create(&badTable) == nullptr);
         astratto_mesher_destroy(m);
     }
     // ------------------------------------------------------------ 2.0: the simulation services and gameplay modules
@@ -309,6 +320,7 @@ int main(int argc, char** argv) {
         const size_t slash = dir.find_last_of("/\\");
         dir = slash == std::string::npos ? "." : dir.substr(0, slash);
         services_checks(dir.c_str());
+        hardening_checks(dir.c_str());
     }
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

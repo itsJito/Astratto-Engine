@@ -22,13 +22,18 @@ or newer on Windows (found by `native/build.bat`, no CMake needed), CMake 3.16+ 
 renderer needs OpenGL 4.5.
 
 ```
-./gradlew buildNative     # the native core, its self-test (65 checks) and the example C++ module -> native/bin/<platform>/
+./gradlew buildNative     # the native core, its self-test (75 checks) and the example C++ module -> native/bin/<platform>/
 ./gradlew build           # the jar (native library, shaders, resources inside), API docs, and the tests
 ./gradlew test            # boundary, interoperability and integration tests, with ASTRATTO_JAVA_FALLBACK=0
 ```
 
 The directory can be copied anywhere: nothing in it refers to anything outside it. `build` builds the native core
 first if `native/bin/<platform>/` is empty.
+
+On Windows `native\build.bat checked` runs the self-test bounds-checked, `native\build.bat asan` under
+AddressSanitizer, and `native\build.bat bench` runs the benchmark against `native/tests/budgets.txt`. CMake has
+`-DASTRATTO_SANITIZE=ON` and `-DASTRATTO_WERROR=ON` for the same. CI (`.github/workflows/ci.yml`) runs all of it on
+Windows, Linux and macOS; see `docs/API.md`, section 8.
 
 ## Start a game
 
