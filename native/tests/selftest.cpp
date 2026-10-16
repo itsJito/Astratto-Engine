@@ -158,10 +158,21 @@ int main() {
     astratto_world_desc wd{};
     wd.struct_size = sizeof(wd); wd.size_x = SX; wd.size_y = SY; wd.size_z = SZ; wd.below_floor_block = STONE;
     wd.blocks = cells.data(); wd.block_bytes = cells.size();
-    check("the world is loaded", astratto_world_load(e, &wd) == ASTRATTO_OK);
+    astratto_handle world = ASTRATTO_NO_HANDLE;
+    check("the world is made", astratto_world_create(e, &wd, &world) == ASTRATTO_OK && ASTRATTO_HANDLE_KIND(world) == ASTRATTO_KIND_WORLD);
     astratto_world_desc wrong = wd;
     wrong.block_bytes -= 1;
-    check("a world whose size does not match its cells is refused", astratto_world_load(e, &wrong) == ASTRATTO_ERR_ARGUMENT);
+    astratto_handle wrongWorld = ASTRATTO_NO_HANDLE;
+    check("a world whose size does not match its cells is refused", astratto_world_create(e, &wrong, &wrongWorld) == ASTRATTO_ERR_ARGUMENT && wrongWorld == ASTRATTO_NO_HANDLE);
+    {
+        Stream s;
+        astratto_cmd_handle act{};
+        act.handle = world;
+        s.add(act, ASTRATTO_CMD_WORLD_ACTIVATE);
+        int32_t status = -99;
+        run(e, s, &status);
+        check("the world is made the active one by command", status == ASTRATTO_OK);
+    }
 
     // ------------------------------------------------------------ routes
     {

@@ -147,26 +147,6 @@ public final class Batch2D {
 
     public int whiteTex() { return white; }
 
-    private static final String VS = """
-        #version 330 core
-        layout(location=0) in vec2 aPos;
-        layout(location=1) in vec2 aUV;
-        layout(location=2) in vec4 aCol;
-        layout(location=3) in float aMode;
-        uniform mat4 uProj;
-        out vec2 vUV; out vec4 vCol; out float vMode;
-        void main() { vUV = aUV; vCol = aCol; vMode = aMode; gl_Position = uProj * vec4(aPos, 0.0, 1.0); }
-        """;
-    private static final String FS = """
-        #version 330 core
-        in vec2 vUV; in vec4 vCol; in float vMode;
-        uniform sampler2D uTex;
-        out vec4 frag;
-        void main() {
-            vec4 t = texture(uTex, vUV);
-            if (vMode > 0.5) frag = vec4(vCol.rgb, vCol.a * t.r);
-            else frag = t * vCol;
-            if (frag.a < 0.003) discard;
-        }
-        """;
+    private static final String VS = astratto.render.Shaders.source("ui2d.vert");
+    private static final String FS = astratto.render.Shaders.source("ui2d.frag");
 }

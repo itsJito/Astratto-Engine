@@ -38,6 +38,9 @@ public final class ParticleBatch {
 
     public void clear() { count = 0; buf.clear(); }
 
+    /** 2.0: the particles added since clear(), 12 floats each, read-only (what the native renderer is handed). */
+    public FloatBuffer data() { FloatBuffer d = buf.duplicate(); d.flip(); return d.asReadOnlyBuffer(); }
+
     /** rgb may exceed 1 (HDR); age is 0..1 over the particle's life; seed decorrelates the noise. */
     public void add(float x, float y, float z, float size, float r, float g, float b, float a, float rotation, int kind, float age, float seed) {
         if (count == capacity) {

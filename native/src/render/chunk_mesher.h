@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "astratto/astratto.h"
+#include "world/voxel_world.h"
 
 namespace astratto {
 
@@ -66,5 +67,11 @@ private:
     static void putVertex(std::vector<uint8_t>& o, int x, int y, int z, int normal, int s, int t, int layer, int var, int flags, int sky, int blk, int ao);
     static void putVertexF(std::vector<uint8_t>& o, int fx, int fy, int fz, int normal, int s, int t, int layer, int var, int flags, int sky, int blk);
 };
+
+/**
+ * Copies one sixteen-by-sixteen column of a world, with its border of one cell, into the layout the mesher reads
+ * (index ((x + 1) * 18 + (z + 1)) * size_y + y): cells beyond the world's edge are air, their light full daylight.
+ */
+void copyColumn(const VoxelWorld& w, int cx, int cz, std::vector<uint8_t>& cells, std::vector<uint8_t>& light);
 
 }  // namespace astratto

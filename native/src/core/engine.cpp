@@ -3,7 +3,12 @@
 #include <chrono>
 #include <cstring>
 
+#include "ai/ai_service.h"
+#include "audio/audio_service.h"
+#include "modules/module_host.h"
 #include "perception/sight.h"
+#include "physics/physics_service.h"
+#include "world/raycast.h"
 
 namespace astratto {
 
@@ -26,11 +31,18 @@ Engine::Engine(const astratto_config& cfg) : config_(cfg), pool_(extraThreads(cf
     for (unsigned i = 0; i < pool_.workers(); i++) finders_.emplace_back(new Pathfinder());
     stats_.struct_size = sizeof(astratto_stats);
     stats_.workers = pool_.workers();
+    snapshots_.resize(8);
+    // the services, in the order they step: modules first (they write commands, as the caller does), then the
+    // simulation - bodies move, then the minds that ride them look and decide, then the sound of it all
+    addService(std::unique_ptr<Service>(new ModuleHost()));
+    addService(std::unique_ptr<Service>(new PhysicsService()));
+    addService(std::unique_ptr<Service>(new AiService()));
+    addService(std::unique_ptr<Service>(new AudioService(cfg)));
 }
 
 Engine::~Engine() {
-    // services first: they hold handles into the worlds
-    services_.clear();
+    // services first: they hold handles into the worlds (and modules hold the services); the last made goes first
+    while (!services_.empty()) services_.pop_back();
 }
 
 void Engine::error(uint32_t command, int32_t status, astratto_handle h) {
@@ -54,7 +66,7 @@ int32_t Engine::reserve(uint32_t kind, uint32_t count, astratto_handle* out) {
 }
 
 int32_t Engine::release(astratto_handle h) {
-    if (h == ASTRATTO_NO_HANDLE) return ASTRATTO_ERR_HANDLE;
+    if (h == ASTRATTO_NO_HANDLE) { fail("release of no handle"); return ASTRATTO_ERR_HANDLE; }
     if (handleKind(h) == ASTRATTO_KIND_WORLD) {
         if (!worlds_.valid(h)) { fail("release of a stale world handle"); return ASTRATTO_ERR_HANDLE; }
         if (h == activeHandle_) { for (const auto& s : services_) s->worldChanged(*this); active_ = nullptr; activeHandle_ = ASTRATTO_NO_HANDLE; }
@@ -62,7 +74,7 @@ int32_t Engine::release(astratto_handle h) {
         return ASTRATTO_OK;
     }
     for (const auto& s : services_) if (s->release(*this, h)) return ASTRATTO_OK;
-    fail("release of a handle nothing holds");
+    fail("release of a handle nothing holds (stale, or never made)");
     return ASTRATTO_ERR_HANDLE;
 }
 
@@ -95,6 +107,12 @@ int Engine::applyEdit(VoxelWorld& w, uint32_t type, const uint8_t* rec, uint32_t
             if (!readRecord(rec, bytes, c)) return ASTRATTO_ERR_STREAM;
             w.fill(c.x0, c.y0, c.z0, c.x1, c.y1, c.z1, static_cast<int>(c.block & 0xFF));
             return ASTRATTO_OK;
+        }
+        case ASTRATTO_EDIT_COLUMN: {
+            astratto_edit_column c;
+            if (!readRecord(rec, bytes, c)) return ASTRATTO_ERR_STREAM;
+            if (bytes < sizeof(c) + static_cast<uint32_t>(w.sizeY())) return ASTRATTO_ERR_STREAM;
+            return w.setColumn(c.x, c.z, rec + sizeof(c)) ? ASTRATTO_OK : ASTRATTO_ERR_ARGUMENT;
         }
         case ASTRATTO_EDIT_LIGHT_ALL: w.lightAll(); return ASTRATTO_OK;
         case ASTRATTO_EDIT_LIGHT_BOX: {
@@ -153,6 +171,14 @@ int32_t Engine::edit(astratto_handle world, const uint8_t* records, uint32_t byt
     return ASTRATTO_OK;
 }
 
+int32_t Engine::setCell(astratto_handle world, int x, int y, int z, uint32_t block) {
+    VoxelWorld* w = worlds_.get(world);
+    if (w == nullptr) { fail("set on a world handle that is not a live world"); return ASTRATTO_ERR_HANDLE; }
+    if (block & ASTRATTO_SET_RAW) w->setRaw(x, y, z, static_cast<int>(block & 0xFF));
+    else { w->set(x, y, z, static_cast<int>(block & 0xFF)); stats_.block_edits++; }
+    return ASTRATTO_OK;
+}
+
 void Engine::activate(astratto_handle h) {
     if (h == activeHandle_) return;
     for (const auto& s : services_) s->worldChanged(*this);
@@ -160,15 +186,80 @@ void Engine::activate(astratto_handle h) {
     activeHandle_ = active_ ? h : ASTRATTO_NO_HANDLE;
 }
 
+// ------------------------------------------------------------------ one command
+int32_t Engine::command(const uint8_t* rec, uint32_t bytes) {
+    astratto_record head;
+    std::memcpy(&head, rec, sizeof(head));
+    int r = -1;
+    switch (head.type) {
+        case ASTRATTO_CMD_NAV_TUNING: {
+            astratto_cmd_nav_tuning c;
+            r = readRecord(rec, bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) { tuning_.jumpCost = c.jump_cost; tuning_.ladderCost = c.ladder_cost; tuning_.mantleCost = c.mantle_cost; }
+            break;
+        }
+        case ASTRATTO_CMD_WORLD_ACTIVATE: {
+            astratto_cmd_handle c;
+            r = readRecord(rec, bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) { if (c.handle != ASTRATTO_NO_HANDLE && !worlds_.valid(c.handle)) error(head.type, ASTRATTO_ERR_HANDLE, c.handle); else activate(c.handle); }
+            break;
+        }
+        case ASTRATTO_CMD_RELEASE: {
+            astratto_cmd_handle c;
+            r = readRecord(rec, bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK && release(c.handle) != ASTRATTO_OK) error(head.type, ASTRATTO_ERR_HANDLE, c.handle);
+            break;
+        }
+        case ASTRATTO_CMD_PATH_REQUEST: {
+            Path p;
+            r = readRecord(rec, bytes, p.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) paths_.push_back(std::move(p));
+            break;
+        }
+        case ASTRATTO_CMD_SIGHT_REQUEST: {
+            Sight s;
+            r = readRecord(rec, bytes, s.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) sights_.push_back(s);
+            break;
+        }
+        case ASTRATTO_CMD_WALK_QUERY: {
+            Walk q;
+            r = readRecord(rec, bytes, q.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) walks_.push_back(q);
+            break;
+        }
+        case ASTRATTO_CMD_RAY_QUERY: {
+            Ray q;
+            r = readRecord(rec, bytes, q.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
+            if (r == ASTRATTO_OK) rays_.push_back(q);
+            break;
+        }
+        default:
+            if (head.type < 32) {
+                if (active_ != nullptr) r = applyEdit(*active_, head.type, rec, bytes);
+                else { error(head.type, ASTRATTO_ERR_STATE, ASTRATTO_NO_HANDLE); r = ASTRATTO_OK; }
+            }
+            if (r == -1) for (const auto& s : services_) { r = s->command(*this, head.type, rec, bytes); if (r != -1) break; }
+            if (r > 0 || (r < -1 && r != ASTRATTO_ERR_STREAM)) { error(head.type, r, ASTRATTO_NO_HANDLE); r = ASTRATTO_OK; }
+            if (r == -1) r = ASTRATTO_OK;   // a command from a newer version of the interface: skipped, by its own stated size
+            break;
+    }
+    if (r == ASTRATTO_ERR_STREAM) return ASTRATTO_ERR_STREAM;
+    stats_.commands++;
+    return ASTRATTO_OK;
+}
+
 // ------------------------------------------------------------------ the tick
 int32_t Engine::frame(const uint8_t* commands, uint32_t bytes, float dt) {
     const auto t0 = std::chrono::steady_clock::now();
-    events_.clear();
-    eventCount_ = 0;
-    paths_.clear();
-    sights_.clear();
-    walks_.clear();
+    events_.swap(pending_);
+    eventCount_ = pendingCount_;
+    pending_.clear();
+    pendingCount_ = 0;
+    inFrame_ = true;
+    // (questions asked after the last frame's answers - by a module looking at its events - are still waiting: kept)
     int32_t status = ASTRATTO_OK;
+    if (!(dt >= 0) || dt > 10) dt = 0;          // a NaN, a negative or an absurd step is not run
 
     // 1. the batch, in the order it was written: changes are made now, questions are kept for after
     uint32_t at = 0;
@@ -177,131 +268,106 @@ int32_t Engine::frame(const uint8_t* commands, uint32_t bytes, float dt) {
         if (bytes - at < sizeof(head)) { fail("command stream ends inside a record header"); status = ASTRATTO_ERR_STREAM; break; }
         std::memcpy(&head, commands + at, sizeof(head));
         if (head.bytes < sizeof(head) || (head.bytes & 3u) != 0 || head.bytes > bytes - at) { fail("command record with a bad size"); status = ASTRATTO_ERR_STREAM; break; }
-        const uint8_t* rec = commands + at;
-        int r = -1;
-        switch (head.type) {
-            case ASTRATTO_CMD_NAV_TUNING: {
-                astratto_cmd_nav_tuning c;
-                r = readRecord(rec, head.bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK) { tuning_.jumpCost = c.jump_cost; tuning_.ladderCost = c.ladder_cost; tuning_.mantleCost = c.mantle_cost; }
-                break;
-            }
-            case ASTRATTO_CMD_WORLD_ACTIVATE: {
-                astratto_cmd_handle c;
-                r = readRecord(rec, head.bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK) { if (c.handle != ASTRATTO_NO_HANDLE && !worlds_.valid(c.handle)) { error(head.type, ASTRATTO_ERR_HANDLE, c.handle); } else activate(c.handle); }
-                break;
-            }
-            case ASTRATTO_CMD_RELEASE: {
-                astratto_cmd_handle c;
-                r = readRecord(rec, head.bytes, c) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK && release(c.handle) != ASTRATTO_OK) error(head.type, ASTRATTO_ERR_HANDLE, c.handle);
-                break;
-            }
-            case ASTRATTO_CMD_PATH_REQUEST: {
-                Path p;
-                r = readRecord(rec, head.bytes, p.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK) paths_.push_back(std::move(p));
-                break;
-            }
-            case ASTRATTO_CMD_SIGHT_REQUEST: {
-                Sight s;
-                r = readRecord(rec, head.bytes, s.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK) sights_.push_back(s);
-                break;
-            }
-            case ASTRATTO_CMD_WALK_QUERY: {
-                Walk q;
-                r = readRecord(rec, head.bytes, q.cmd) ? ASTRATTO_OK : ASTRATTO_ERR_STREAM;
-                if (r == ASTRATTO_OK) walks_.push_back(q);
-                break;
-            }
-            default:
-                if (active_ != nullptr) r = applyEdit(*active_, head.type, rec, head.bytes);
-                else if (head.type < 16) { error(head.type, ASTRATTO_ERR_STATE, ASTRATTO_NO_HANDLE); r = ASTRATTO_OK; }
-                if (r == -1) for (const auto& s : services_) { r = s->command(*this, head.type, rec, head.bytes); if (r != -1) break; }
-                if (r > 0 || (r < -1 && r != ASTRATTO_ERR_STREAM)) { error(head.type, r, ASTRATTO_NO_HANDLE); r = ASTRATTO_OK; }
-                if (r == -1) r = ASTRATTO_OK;   // a command from a newer version of the interface: skipped, by its own stated size
-                break;
-        }
-        if (r == ASTRATTO_ERR_STREAM) { fail("command record shorter than its kind"); status = ASTRATTO_ERR_STREAM; break; }
-        stats_.commands++;
+        if (command(commands + at, head.bytes) == ASTRATTO_ERR_STREAM) { fail("command record shorter than its kind"); status = ASTRATTO_ERR_STREAM; break; }
         at += head.bytes;
     }
 
-    // 2. the simulation
+    // 2. + 3. modules (the first service), then the simulation, in service order
     const auto s0 = std::chrono::steady_clock::now();
-    if (dt > 0) for (const auto& s : services_) s->step(*this, dt);
+    for (const auto& s : services_) s->step(*this, dt);
     stats_.sim_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - s0).count();
+    stats_.sim_time += dt;
 
-    // 3. the questions, against the world as the batch left it. Nothing changes the world while they run, so they
-    //    are shared out among the workers; each answer depends only on its own question.
-    if (!paths_.empty() || !sights_.empty() || !walks_.empty()) {
-        if (active_ == nullptr) {
-            fail("a path, sight or walk request with no active world");
-            if (status == ASTRATTO_OK) status = ASTRATTO_ERR_STATE;
-        } else {
-            const VoxelWorld& world = *active_;
-            pool_.parallelFor(paths_.size(), [this, &world](size_t i, unsigned worker) {
-                Path& p = paths_[i];
-                PathQuery q;
-                q.sx = p.cmd.sx; q.sy = p.cmd.sy; q.sz = p.cmd.sz; q.tx = p.cmd.tx; q.ty = p.cmd.ty; q.tz = p.cmd.tz;
-                q.maxExpand = static_cast<int>(p.cmd.max_expand);
-                q.doors = (p.cmd.flags & ASTRATTO_PATH_DOORS) != 0;
-                q.goalY = (p.cmd.flags & ASTRATTO_PATH_GOAL_Y) != 0;
-                q.mantle = (p.cmd.flags & ASTRATTO_PATH_MANTLE) != 0;
-                p.found = finders_[worker]->path(world, tuning_, q, p.cells, p.expansions);
-            });
-            pool_.parallelFor(sights_.size(), [this, &world](size_t i, unsigned) {
-                Sight& s = sights_[i];
-                s.clear = sightClear(world, s.cmd.ax, s.cmd.ay, s.cmd.az, s.cmd.bx, s.cmd.by, s.cmd.bz, s.cmd.mode == ASTRATTO_SIGHT_EYE);
-            });
-            pool_.parallelFor(walks_.size(), [this, &world](size_t i, unsigned) {
-                Walk& q = walks_[i];
-                const auto& c = q.cmd;
-                const bool doors = c.doors != 0;
-                switch (c.kind) {
-                    case ASTRATTO_WALK_CLEAR: q.value = Pathfinder::clear(world, c.ax, c.ay, c.az, c.bx, c.bz, doors) ? 1 : 0; break;
-                    case ASTRATTO_WALK_CLEAR_BODY: q.value = Pathfinder::clearBody(world, c.ax, c.ay, c.az, c.bx, c.bz, doors, c.radius) ? 1 : 0; break;
-                    case ASTRATTO_WALK_STAND: q.value = Pathfinder::stand(world, static_cast<int>(std::floor(c.ax)), static_cast<int>(std::floor(c.ay)), static_cast<int>(std::floor(c.az)), doors) ? 1 : 0; break;
-                    case ASTRATTO_WALK_STEP_Y: q.value = Pathfinder::stepY(world, static_cast<int>(std::floor(c.ax)), static_cast<int>(std::floor(c.az)), static_cast<int>(std::floor(c.ay)), doors); break;
-                    default: q.value = -1; break;
-                }
-            });
-            // 4. the answers, in the order the questions were asked
-            for (const Path& p : paths_) {
-                astratto_evt_path_result e{};
-                const size_t tail = p.cells.size() * sizeof(int32_t);
-                e.request = p.cmd.request;
-                e.status = p.found ? ASTRATTO_PATH_FOUND : ASTRATTO_PATH_NONE;
-                e.expansions = p.expansions;
-                e.cell_count = static_cast<uint32_t>(p.cells.size() / 3);
-                emit(e, ASTRATTO_EVT_PATH_RESULT, p.cells.data(), tail);
-                stats_.path_requests++;
-                stats_.path_expansions += p.expansions;
-                if (p.found) stats_.paths_found++;
-            }
-            for (const Sight& s : sights_) {
-                astratto_evt_sight_result e{};
-                e.request = s.cmd.request;
-                e.clear = s.clear ? 1u : 0u;
-                emit(e, ASTRATTO_EVT_SIGHT_RESULT);
-                stats_.sight_requests++;
-            }
-            for (const Walk& q : walks_) {
-                astratto_evt_walk_result e{};
-                e.request = q.cmd.request;
-                e.value = q.value;
-                emit(e, ASTRATTO_EVT_WALK_RESULT);
-            }
-        }
-    }
+    // 4. the questions, against the world as the batch and the step left it
+    answerQuestions(status);
 
+    // 5. modules see what happened
+    for (const auto& s : services_) s->frameEnd(*this);
+
+    inFrame_ = false;
     stats_.frames++;
     const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
     stats_.last_frame_ms = ms;
     if (ms > stats_.worst_frame_ms) stats_.worst_frame_ms = ms;
     return status;
+}
+
+void Engine::answerQuestions(int32_t& status) {
+    if (paths_.empty() && sights_.empty() && walks_.empty() && rays_.empty()) return;
+    if (active_ == nullptr) {
+        fail("a path, sight, walk or ray request with no active world");
+        if (status == ASTRATTO_OK) status = ASTRATTO_ERR_STATE;
+        paths_.clear(); sights_.clear(); walks_.clear(); rays_.clear();
+        return;
+    }
+    // nothing changes the world while they run, so they are shared out among the workers; each answer depends only on
+    // its own question
+    const VoxelWorld& world = *active_;
+    pool_.parallelFor(paths_.size(), [this, &world](size_t i, unsigned worker) {
+        Path& p = paths_[i];
+        PathQuery q;
+        q.sx = p.cmd.sx; q.sy = p.cmd.sy; q.sz = p.cmd.sz; q.tx = p.cmd.tx; q.ty = p.cmd.ty; q.tz = p.cmd.tz;
+        q.maxExpand = static_cast<int>(p.cmd.max_expand);
+        q.doors = (p.cmd.flags & ASTRATTO_PATH_DOORS) != 0;
+        q.goalY = (p.cmd.flags & ASTRATTO_PATH_GOAL_Y) != 0;
+        q.mantle = (p.cmd.flags & ASTRATTO_PATH_MANTLE) != 0;
+        p.found = finders_[worker]->path(world, tuning_, q, p.cells, p.expansions);
+    });
+    pool_.parallelFor(sights_.size(), [this, &world](size_t i, unsigned) {
+        Sight& s = sights_[i];
+        s.clear = sightClear(world, s.cmd.ax, s.cmd.ay, s.cmd.az, s.cmd.bx, s.cmd.by, s.cmd.bz, s.cmd.mode == ASTRATTO_SIGHT_EYE);
+    });
+    pool_.parallelFor(walks_.size(), [this, &world](size_t i, unsigned) {
+        Walk& q = walks_[i];
+        const auto& c = q.cmd;
+        const bool doors = c.doors != 0;
+        switch (c.kind) {
+            case ASTRATTO_WALK_CLEAR: q.value = Pathfinder::clear(world, c.ax, c.ay, c.az, c.bx, c.bz, doors) ? 1 : 0; break;
+            case ASTRATTO_WALK_CLEAR_BODY: q.value = Pathfinder::clearBody(world, c.ax, c.ay, c.az, c.bx, c.bz, doors, c.radius) ? 1 : 0; break;
+            case ASTRATTO_WALK_STAND: q.value = Pathfinder::stand(world, static_cast<int>(std::floor(c.ax)), static_cast<int>(std::floor(c.ay)), static_cast<int>(std::floor(c.az)), doors) ? 1 : 0; break;
+            case ASTRATTO_WALK_STEP_Y: q.value = Pathfinder::stepY(world, static_cast<int>(std::floor(c.ax)), static_cast<int>(std::floor(c.az)), static_cast<int>(std::floor(c.ay)), doors); break;
+            default: q.value = -1; break;
+        }
+    });
+    pool_.parallelFor(rays_.size(), [this, &world](size_t i, unsigned) {
+        Ray& q = rays_[i];
+        const auto& c = q.cmd;
+        float l = std::sqrt(c.dx * c.dx + c.dy * c.dy + c.dz * c.dz);
+        q.out.request = c.request;
+        q.out.distance = -1;
+        if (l < 1e-6f) return;
+        const RayHit h = castRay(world, c.ox, c.oy, c.oz, c.dx / l, c.dy / l, c.dz / l, c.max_dist, true);
+        q.out.distance = h.t;
+        q.out.x = h.x; q.out.y = h.y; q.out.z = h.z; q.out.nx = h.nx; q.out.ny = h.ny; q.out.nz = h.nz; q.out.block = static_cast<uint32_t>(h.block);
+    });
+    // the answers, in the order the questions were asked
+    for (const Path& p : paths_) {
+        astratto_evt_path_result e{};
+        const size_t tail = p.cells.size() * sizeof(int32_t);
+        e.request = p.cmd.request;
+        e.status = p.found ? ASTRATTO_PATH_FOUND : ASTRATTO_PATH_NONE;
+        e.expansions = p.expansions;
+        e.cell_count = static_cast<uint32_t>(p.cells.size() / 3);
+        emit(e, ASTRATTO_EVT_PATH_RESULT, p.cells.data(), tail);
+        stats_.path_requests++;
+        stats_.path_expansions += p.expansions;
+        if (p.found) stats_.paths_found++;
+    }
+    for (const Sight& s : sights_) {
+        astratto_evt_sight_result e{};
+        e.request = s.cmd.request;
+        e.clear = s.clear ? 1u : 0u;
+        emit(e, ASTRATTO_EVT_SIGHT_RESULT);
+        stats_.sight_requests++;
+    }
+    for (const Walk& q : walks_) {
+        astratto_evt_walk_result e{};
+        e.request = q.cmd.request;
+        e.value = q.value;
+        emit(e, ASTRATTO_EVT_WALK_RESULT);
+    }
+    for (const Ray& q : rays_) emit(q.out, ASTRATTO_EVT_RAY_RESULT);
+    paths_.clear(); sights_.clear(); walks_.clear(); rays_.clear();
 }
 
 const astratto_stats& Engine::stats() {
@@ -314,8 +380,25 @@ const astratto_stats& Engine::stats() {
     uint64_t lit = 0;
     worlds_.each([&](astratto_handle, const VoxelWorld& w) { lit += w.litCells(); });
     stats_.light_cells = lit;
-    stats_.live[ASTRATTO_KIND_WORLD] = worlds_.live();
+    for (uint32_t k = 0; k < ASTRATTO_KINDS; k++) {
+        uint32_t n = k == ASTRATTO_KIND_WORLD ? worlds_.live() : 0;
+        for (const auto& s : services_) n += s->live(k);
+        stats_.live[k] = n;
+    }
     return stats_;
+}
+
+int32_t Engine::snapshot(uint32_t kind, const void** data, uint64_t* bytes) {
+    if (kind == ASTRATTO_SNAPSHOT_STATS) { const astratto_stats& s = stats(); *data = &s; *bytes = sizeof(s); return ASTRATTO_OK; }
+    if (kind >= snapshots_.size()) { fail("unknown snapshot kind"); *data = nullptr; *bytes = 0; return ASTRATTO_ERR_ARGUMENT; }
+    std::vector<uint8_t>& out = snapshots_[kind];
+    out.clear();
+    bool any = false;
+    for (const auto& s : services_) any |= s->snapshot(*this, kind, out);
+    if (!any) { fail("unknown snapshot kind"); *data = nullptr; *bytes = 0; return ASTRATTO_ERR_ARGUMENT; }
+    *data = out.empty() ? nullptr : out.data();
+    *bytes = out.size();
+    return ASTRATTO_OK;
 }
 
 }  // namespace astratto
