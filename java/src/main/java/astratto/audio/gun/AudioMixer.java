@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class AudioMixer {
     public static final int RATE = 44100;
     private static final int RING = 256, MAX_BLOCK = 4096;
-    private static final boolean TRACE = System.getenv("ABS_AUDIO_TRACE") != null;
+    private static final boolean TRACE = System.getenv("ASTRATTO_AUDIO_TRACE") != null;
 
     // ---- event ring: single producer (game thread), single consumer (audio thread)
     private final ShotEvent[] ring = new ShotEvent[RING];

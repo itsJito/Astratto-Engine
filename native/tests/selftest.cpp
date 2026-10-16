@@ -3,18 +3,21 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "astratto/astratto.h"
 
 namespace {
-
 int passed = 0, failed = 0;
+}  // namespace
 
 void check(const char* what, bool ok) {
     std::printf("  [%s] %s\n", ok ? " ok " : "FAIL", what);
     if (ok) passed++; else failed++;
 }
+
+namespace {
 
 // a world of this program's own: 64 x 32 x 64, a floor at y = 7, and five kinds of block
 const int SX = 64, SY = 32, SZ = 64, FLOOR = 8;
@@ -103,7 +106,9 @@ bool connected(const PathAnswer& p, int sx, int sz) {
 
 }  // namespace
 
-int main() {
+void services_checks(const char* moduleDir);   // services.cpp
+
+int main(int argc, char** argv) {
     std::printf("%s\n", astratto_build_info());
 
     // ------------------------------------------------------------ making an engine
@@ -158,10 +163,21 @@ int main() {
     astratto_world_desc wd{};
     wd.struct_size = sizeof(wd); wd.size_x = SX; wd.size_y = SY; wd.size_z = SZ; wd.below_floor_block = STONE;
     wd.blocks = cells.data(); wd.block_bytes = cells.size();
-    check("the world is loaded", astratto_world_load(e, &wd) == ASTRATTO_OK);
+    astratto_handle world = ASTRATTO_NO_HANDLE;
+    check("the world is made", astratto_world_create(e, &wd, &world) == ASTRATTO_OK && ASTRATTO_HANDLE_KIND(world) == ASTRATTO_KIND_WORLD);
     astratto_world_desc wrong = wd;
     wrong.block_bytes -= 1;
-    check("a world whose size does not match its cells is refused", astratto_world_load(e, &wrong) == ASTRATTO_ERR_ARGUMENT);
+    astratto_handle wrongWorld = ASTRATTO_NO_HANDLE;
+    check("a world whose size does not match its cells is refused", astratto_world_create(e, &wrong, &wrongWorld) == ASTRATTO_ERR_ARGUMENT && wrongWorld == ASTRATTO_NO_HANDLE);
+    {
+        Stream s;
+        astratto_cmd_handle act{};
+        act.handle = world;
+        s.add(act, ASTRATTO_CMD_WORLD_ACTIVATE);
+        int32_t status = -99;
+        run(e, s, &status);
+        check("the world is made the active one by command", status == ASTRATTO_OK);
+    }
 
     // ------------------------------------------------------------ routes
     {
@@ -286,6 +302,13 @@ int main() {
         astratto_render_table bad = t; bad.block_count = 300;
         check("a malformed render table makes no mesher", astratto_mesher_create(&bad) == nullptr);
         astratto_mesher_destroy(m);
+    }
+    // ------------------------------------------------------------ 2.0: the simulation services and gameplay modules
+    {
+        std::string dir = argc > 0 ? argv[0] : "";
+        const size_t slash = dir.find_last_of("/\\");
+        dir = slash == std::string::npos ? "." : dir.substr(0, slash);
+        services_checks(dir.c_str());
     }
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

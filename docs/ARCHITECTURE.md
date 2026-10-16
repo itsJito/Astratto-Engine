@@ -1,101 +1,164 @@
 # Astratto Engine - architecture
 
-Astratto is the technology under Absentialis, being turned into an engine that a future game can use without it.
-This file is the plan and the record: how the engine and a game are divided, the one bridge between them, what has
-crossed so far, and what is still to cross. Written for 1.2 (2026-10-14), when the split began.
+The Astratto Engine is the technology Absentialis was built on, made into an engine that another game can use without
+it. This file is the plan and the record: how an engine and a game are divided, the one bridge between them, what each
+of the eight steps of the 2.0 split delivered, how each is held to its promise, and what is still open.
+
+History: 1.2 (2026-10-14) began the split with a native core holding a copy of the world and answering route searches;
+1.3 moved chunk meshing. 2.0 (2026-10-16) is the split itself, recorded below step by step.
 
 ## The division
 
 | Side | Owns | Language |
 |---|---|---|
-| **Engine, native core** (`astratto/native`) | World state, resource management, rendering, physics and physical animation (Sydney), NeuralAI's perception / route search / plan execution, UltraEngine's audio processing. Native memory and the authoritative state of whatever it simulates. | C++17 |
-| **Engine, Java** (`src/main/java/astratto`, and for now `absentialis.engine`, `absentialis.neuralai`, `absentialis.sydney`) | The bindings to the native core; reusable interface, persistence and tool code that has not moved yet. | Java 21 |
-| **Game** (`absentialis.*` everything else) | Rules, inventory, HUD composition, missions, character goals, AI *policies* (what a mind wants), editor workflows, content. Configures and requests engine services; never executes them. | Java 21 |
-| **Shaders** | Stay shader code, managed by the renderer. | GLSL |
+| **Engine, native core** (`native/`) | The worlds (cells, light, doors) - authoritative; rendering (every GPU resource and pass); physics (character bodies, Sydney's ragdolls and soft bodies, cars); AI (perception, route search, walkability, decisions, plan execution); audio (mixing, positional effects, occlusion, reverb, dynamics); gameplay modules written in C++. | C++17 |
+| **Engine, Java** (`java/`) | The binding to the core (`astratto.bridge`); the module runner (`astratto.game`); the platform layer (window, input); reusable systems that decide *where* things are and hand the core the result (`astratto.foliage`, `astratto.decal`, `astratto.props`); 2D, fonts, voxel models, math, events, tools; the Java reference implementations the native ones were held to (`astratto.ai`, `astratto.audio`). | Java 21 |
+| **Shaders** (`shaders/`) | Stay shader code: GLSL files, bundled in the jar, handed to the renderer by name. | GLSL |
+| **Game** (anything else - Absentialis, or `templates/new-game`) | Rules, inventory, HUD, missions, content, saves, AI *policies* (what a mind wants), what blocks mean and look like. It configures and commands engine services; it never executes them. | Java and/or C++ |
 
-Rules that the bridge is shaped by (they are restated in `astratto/native/include/astratto/astratto.h`):
+## The bridge
 
-1. **One bridge.** `astratto.h` is a plain-C, versioned interface (`ASTRATTO_API_MAJOR.MINOR`). A caller built for
-   another major version is refused at `astratto_create`. Every structure starts with its own size so it can grow.
-2. **Batched.** Nothing is asked of the engine an object at a time. The game writes a tick's commands into a buffer
-   (`astratto.bridge.CommandBuffer`) and hands the batch over once a tick (`astratto_frame`); answers come back in
-   the same call as a batch of events, in the order the questions were written.
-3. **Snapshots, read-only.** State is read back as immutable blocks of plain data (`astratto_snapshot`). Pointers
-   the engine returns stay valid until the next call that returns them; the caller never writes or frees them.
-4. **No callbacks.** The engine never calls into Java - not from a frame, not from a worker thread.
-5. **Engine memory is the engine's.** World data handed over is copied once; from then on the engine's copy changes
-   only by command.
+`native/include/astratto/astratto.h` is the whole interface: plain C, versioned (`ASTRATTO_API_MAJOR.MINOR`, now
+**2.1**), bindable from any language with a foreign-function interface. Its rules:
 
-The Java binding uses LWJGL's foreign-call layer (`org.lwjgl.system.JNI`, already a dependency), so the native core
-has no JNI code in it and can be bound from any language that can call C.
+1. **Batched.** A caller writes a tick's commands into one buffer and hands it over once (`astratto_frame`); the answers
+   and what happened come back as one stream of events. Only creating, viewing and releasing things are calls of their
+   own.
+2. **The engine owns the state.** Worlds, bodies, agents, sounds and modules live in native memory; the caller sees
+   them through read-only views (`astratto_world_get_view` - the engine's memory itself, not a copy) and snapshots.
+3. **Handles.** Everything is named by a 64-bit handle carrying its kind and a generation; a released or forged handle
+   is refused (a status, or an `EVT_ERROR` event), never dereferenced.
+4. **Explicit lifetimes.** Commands: read during the call. Events: until the next frame. Snapshots: until the next
+   snapshot of that kind. Views: until the world is released. Data given to a create call: copied.
+5. **No callbacks.** The engine never calls the caller. C++ gameplay modules are called by the engine only inside
+   `astratto_frame`, on the caller's thread; Java modules are called by the Java runner between frames. No engine worker
+   thread ever leaves native code.
+6. **Growable.** Every structure starts with its size; unknown command records are stepped over by their size; a
+   caller built for another major version is refused at `astratto_create`.
 
-## What has crossed (1.2: stage 1)
+The Java binding (`astratto.bridge.AstrattoNative`) calls the C functions through LWJGL's foreign-call layer - there is
+no JNI code in the native core. When the library loads, the size of every structure the binding writes or reads is
+checked against the library's own (`astratto_layout`); a library built from another header is refused.
 
-| Service | Native (C++) | Java side | How it is held to the old behaviour |
-|---|---|---|---|
-| Voxel world (one byte a cell, block-kind table) | `world/voxel_world` | `absentialis.world.NativeLink`: uploads the world on the first tick of an operation; `World.set`/`setRaw` follow it across as `BLOCK_SET` commands; door locks as `DOOR_SEAL` / `DOORS_UNSEAL` | `native12`: knocking a wall through and rebuilding it changes native routes exactly as Java's |
-| NeuralAI route search (grid A*: steps, drops, ladders, pull-ups, doors, hazards) | `nav/pathfinder`, run in parallel on a worker pool | `Steering` asks through `NativeLink.requestPath`; the route is in hand at the next tick | `native12`: 400 routes across the generated city, identical to `world.Nav.path` cell for cell |
-| NeuralAI line of sight (as light goes, and as an eye sees: glass, doors, furniture heights, canopy) | `perception/sight` | `NativeLink.requestSight` (available; perception still calls the Java walk - see stage 2) | `native12`: 3000 lines, identical to `Physics.los` / `Physics.sight` |
-| Counters snapshot | `astratto_snapshot(STATS)` | `NativeEngine.stats()` | `native12`, and the console's `NativeLink.describe()` |
+### One tick
 
-Build: `astratto/native/build.bat` (MSVC, found with vswhere) or `./gradlew.bat buildNative`; `CMakeLists.txt` for
-everything else. The native core builds and runs on its own: `astratto/bin/astratto_selftest.exe` makes a small world
-of its own and checks the interface end to end (27 checks) without any game present.
+```
+Java modules' update ──commands──> astratto_frame:  1. commands in order (changes now, questions kept)
+                                                     2. C++ modules' update (on this thread)
+                                                     3. physics, AI, audio - fixed rates, for dt seconds
+                                                     4. questions answered on the workers, in the order asked
+                                                     5. C++ modules' event
+Java modules' events, afterFrame  <──events──────────  (returned)
+astratto_render_frame (GL thread): camera, environment, lights, models, layers, particles, 2D
+```
 
-**Fallback.** With no library on the machine (or `ABS_NATIVE=0`) the game runs exactly as 1.1 did: route searches are
-made in Java. A route asked of the engine while nothing is running the engine's tick (a body steered outside an
-operation's update) is not waited on - it is searched for in Java, and counted (`NativeLink.stalls`). The Java search
-stays in the tree as the reference the native one is held to; that duplication is deliberate and temporary, and ends
-when stage 2 moves the remaining callers.
+## The eight steps of 2.0
 
-**One world at a time.** The engine holds one world. Linking another lets the previous link go; a world that is
-rebuilt in place (`CityGenerator`, `DevMap`, `World.restorePristine`) drops its link and is given over again on next use.
+### 1. One engine directory, with no game in it
 
-## What has crossed (1.3: stage 2 - rendering)
+`theastrattoengine/` holds `native/`, `java/`, `shaders/`, `resources/`, `tools/`, `tests/`, `docs/` and
+`templates/new-game/`, and builds on its own. The engine depends on nothing of Absentialis:
 
-The 1.3 brief asked for stage 2 to be rendering, matching the current output one to one. The part of rendering that is
-CPU work and does not touch GL crossed: the voxel chunk mesher.
+- No engine source names the game (`BoundaryTest.noJavaCodeNamesTheGame`, `noNativeCodeNamesTheGame`; comments may
+  record where code came from, code may not), every Java class is in `astratto.*`, and no build file reaches outside
+  the directory.
+- The engine reads no game files: NeuralAI's Java tuning and the gun-audio profiles are read from resources the game
+  names (`NeuralConfig.source(...)`, `WeaponAudioProfile.resource`); Absentialis names its `/content/*.json` in
+  `Main` (`BoundaryTest.theEngineReadsNoGameFiles`). The game's domain events (raids, factions, extraction, missions)
+  moved out of the engine to `absentialis.events.Events`; the engine keeps the event bus.
+- Absentialis includes the engine as a composite build and depends on `astratto:theastrattoengine:2.0.0` like any
+  other library.
 
-| Service | Native (C++) | Java side | How it is held to the old behaviour |
-|---|---|---|---|
-| Chunk meshing (greedy faces with per-corner AO and smooth light, crossed planes, shaped blocks turned by their neighbours) | `render/chunk_mesher` behind `astratto_mesher_create` / `astratto_mesh_column` (interface 1.1) | `astratto.bridge.NativeMesher` (names nothing of the game); `absentialis.engine.render.ChunkMesher` builds the render table from `Block`/`Shapes` once and hands each column over (18 x H x 18 cells and light) | `render13`: all 2710 columns of the city byte-identical, with doors drawn and plants removed as well; in play, frames native vs Java pixel-identical, or within 1/255 where probes settle a frame sooner |
+### 2. The renderer is native
 
-**Not in the tick.** A mesher does not run inside `astratto_frame`: the renderer meshes on its own threads (the whole
-world at load, changed columns after), in the hideout as well as on operations, with no engine world. So a mesher is
-its own object, made from a render table and used by one thread at a time; a column is its unit of work. It holds no
-world: light is computed in Java (`world.Lighting`) and travels with each column, which also keeps the mesher out of
-the question of who owns the cells until that is settled.
+`native/src/render/` is the hybrid global-illumination renderer, pass for pass the one Absentialis grew in Java: chunk
+meshing of the engine's own world on the engine's workers, the GPU voxel volume and the irradiance probes traced
+through it, shadow cascades, G-buffer, compute light culling, GTAO, SSR, lighting, volumetric fog, the forward pass
+(glass, water, see-through models, particles), TAA, bloom, auto exposure, tone mapping and grading, and the 2D layer.
+2.1 added the **layers** (`render/layers.cpp`): foliage and props drawn instanced and decals drawn over surfaces, into
+the G-buffer and the first shadow cascades. The Java foliage, decal and prop systems keep their placement rules - where
+a plant grows, where a stain runs - and hand the renderer meshes and instance lists (`initNative`, `frame`).
 
-**Fallback.** `ABS_NATIVE=0` (everything) or `ABS_NATIVE_MESH=0` (the mesher alone) mesh in Java; so does a machine
-without the library. 1.47 ms a column native against 2.69 ms in Java, on one thread, copies included.
+Every GPU resource (textures, meshes, instance buffers, targets, programs) is created, used and freed natively; the
+GLSL stays in `shaders/`. Held by: `IntegrationTest.theNativeRendererDrawsAnEngineWorld` (an engine world meshed and
+drawn with all three layers into a real GL 4.5 context, read back); in Absentialis, `ABS_NATIVE_RENDER=1` draws the
+city through it - the `car` scenario's frames match the Java renderer's with the foliage, decals and props in place.
 
-## What has not crossed, and the order it should go in
+### 3. The world and the simulation are the engine's
 
-Every system was looked at for 1.2. In the order that the dependency graph allows:
+Worlds are created, edited and lit by the engine (`astratto_world_create`, edit records, `ASTRATTO_WORLD_LIGHT`); the
+caller reads them through the view. In Absentialis a linked `World` lets its arrays go and reads the engine's memory
+(gates `v20`: the city's cells and light, edits, relighting and handing back all agree with the Java code they
+replaced). The interface carries entity handles, batched commands and events, the memory lifetimes above, and a real
+simulation: `astratto_frame` runs physics, AI and audio for `dt` at fixed internal rates, so a run does not depend on
+how it is cut into frames (native self-test: "a body's fall is the same whether its second is cut into 120 frames or
+24"; `InteropTest.snapshotsAreCopiesTheCallerOwns` checks the simulated time and steps).
 
-| Stage | System | Now | To do |
-|---|---|---|---|
-| 2b | NeuralAI perception | Java (`neuralai.perception`, `Physics.sight` called inline, 34 call sites) | Batch a tick's sight lines through `requestSight`; perception reads last tick's answers. The native side exists. |
-| 2b | Straight-line walkability (`Nav.clear`, `clearBody`, `stand`, `stepY`) | Java, called inline by steering | Port beside the pathfinder; steering asks with its route request. |
-| 2b | World ownership | Java `World.blocks` is still the array the renderer and physics read; the native copy mirrors it | Allocate the cells natively and give Java a read-only view (direct buffer) - the mirror and its upload go away. |
-| 3 | Sydney physical animation (`character.Ragdoll`, `sydney.SoftBody`, controllers) | Java | Port the Verlet solver and the motor controllers; game sends motion intents, reads pose snapshots. `SoftBody` was written for 1.2 with no game imports so that it moves as one piece. |
-| 3 | Body / vehicle physics (`entity.Physics`, `vehicle.*`) | Java | After Sydney: one native physics world. |
-| 4 | UltraEngine audio processing (mixing, occlusion, reverb) | Java (`engine.audio`) | Port the mixer and DSP; the game queues cues per tick. Decoding can stay where it is until then. |
-| 5 | Rendering (`engine.render`: hybrid GI, probes, the GL passes) | Java + GLSL | Meshing crossed in 1.3 (above). The rest is the most tied to LWJGL's GL bindings and goes last. |
+### 4. Native AI with game-supplied behaviour
 
-### Debt: engine packages that still name the game's classes
+`native/src/ai/`: an agent perceives with the engine's own sight lines (as an eye sees: glass, doors, furniture,
+canopy) and hears noises; decides with a **policy** - actions scored by considerations over sixteen game-set facts and
+what the engine knows (target seen, distance, time since seen or heard, ...), with inertia; and carries out movement
+actions with the native pathfinder and walkability checks (`nav/`, also offered as `WALK_QUERY`), re-planning when the
+world changes. Policies are data a game builds; an action of kind `CUSTOM` is carried out by the game's Java or C++
+module (the engine only reports that it was chosen). Held by the native self-test (an agent behind a wall does not see;
+told by a fact, it routes through the gap, sees, approaches and arrives) and `IntegrationTest`.
 
-These 23 files are inside the engine's Java packages and import game classes. `boundary12` counts them and fails if
-the number grows; it may only shrink.
+### 5. Physics and audio are native services
 
-- `engine/render`: `Atlas`, `ChunkMesher`, `HybridRenderer`, `ProbeField`, `VoxelVolume`, `WorldRenderer` - read
-  `world.World` / `world.Block` directly. Cut by handing the renderer a block-kind table (as the native core is given)
-  and a cell view instead of the game's classes.
-- `neuralai/integration` (10 files: `Blows`, `Breach`, `Creatures`, `GameAdapter`, `Lines`, `NeuralHost`, `Relations`,
-  `Routines`, `Steering`, `SydneyAdapter`) - this package *is* the adapter between NeuralAI and the game. It should move
-  out of the engine into the game (`absentialis.ai`), leaving `neuralai.api` as the engine's interface.
-- `sydney` (7 files: `AnimationBridge`, `BehaviorController`, `ContextualMotion`, `MotorController`, `PhysicsRig`,
-  `SensorSystem`, `SydneyCharacter`) - depend on `character.Ragdoll` / `Rig` and `entity.Actor`. Cut when the humanoid
-  ragdoll is expressed as a `SoftBody` rig (stage 3).
+- `physics/sydney.cpp`, `ragdoll.cpp`: Sydney's fifteen-particle ragdoll and its controllers (balance, stepping,
+  falling, bracing, getting up, dying), with profiles for humans, infected, crawlers and giants, and soft bodies.
+- `physics/bodies.cpp`: character bodies (movers) and cars (rigid body, suspension, tyres, transmission, surfaces).
+- `audio/`: UltraEngine's mixer on its own thread - five buses and a master, distance, panning, air absorption,
+  occlusion through the world, a shared reverb sized from the geometry round the listener, compressor and limiter - or
+  rendered on request without a device.
 
-`src/main/java/astratto` (the bridge) names nothing of Absentialis; `boundary12` checks that too.
+Motion commands (`MOVER_INPUT`, `RAGDOLL_HIT`, `VEHICLE_INPUT`, ...), pose snapshots, collision events (`LANDED`,
+`VEHICLE_IMPACT`, `BLOCK_HIT`, `RAGDOLL_STATE`) and audio cues (`VOICE_PLAY`, `LISTENER`) cross the interface. Held by
+the native self-test (65 checks: physics, Sydney, cars, AI, audio, modules, handles) and `IntegrationTest`.
+
+### 6. Gameplay in Java or C++
+
+- Java: `astratto.game.GameModule` (init, update, events by kind, afterFrame, shutdown), run by `astratto.game.Game`.
+- C++: `native/include/astratto/astratto_module.h` (init, update, event, shutdown), a shared library loaded with
+  `astratto_module_load` / `Game.loadNative`; `native/modules/example` is the one to copy. It links nothing of the
+  engine and talks to it only through the host it is handed.
+
+Both write commands and read events, snapshots and the view. The rule that native worker threads never call Java is
+kept by construction (there is no callback in the interface - `BoundaryTest.theInterfaceHasNoCallbacksIntoTheCaller`,
+`theNativeCoreNeverCallsJava`) and a `Game` refuses to be ticked from any thread but its own
+(`InteropTest.gameplayModulesInJavaAndCppRunInTheStatedOrder`, which also checks the order and that both kinds of module
+see the same events).
+
+### 7. Independently buildable and relocatable
+
+- `./gradlew buildNative`: `native/build.bat` (Visual C++, found with vswhere) on Windows, CMake elsewhere
+  (`native/CMakeLists.txt`), into `native/bin/<os>-<arch>/`, then the self-test.
+- `./gradlew build`: the jar carries the native library (`astratto/natives/<os>-<arch>/`), the shaders and the
+  resources; the binding extracts the library for the machine it runs on. Javadoc and sources jars are built too.
+- Dependencies are declared in `build.gradle` (LWJGL core, GLFW, stb, OpenGL bindings; JLayer; JUnit for tests); the
+  native core needs only the C++17 standard library and the system's libraries. `LICENSE.md` and `NOTICE.md` (every
+  third-party component and its licence) ship in the jar.
+- Documentation: `README.md`, `docs/API.md` (the guide), the header (the reference), Javadoc.
+- `templates/new-game`: a starter game with an empty map built from code - nothing from the Absentialis repository.
+
+### 8. Acceptance
+
+`./gradlew acceptance` (in the engine) copies the engine's sources - no build output, no native binaries - to a new
+directory (`-PacceptanceDir=...`, default under the system's temporary directory) and there builds the native core from
+source, builds the engine and runs its tests, then runs the starter game off-screen for 600 frames with
+`ASTRATTO_JAVA_FALLBACK=0` and checks that the world was meshed and drawn natively and the picture is a picture, that
+the bodies, the ragdoll and the car moved, that the AI decided, heard and moved, that the mixer mixed, that the Java
+modules ran every tick and received events, and that the C++ module ran inside the frames.
+
+With Java fallbacks disabled, `NativeEngine.create`, `NativeRenderer.create` and `NativeMesher.create` throw instead
+of returning null, so nothing passes on a Java path.
+
+## What is not done, or not verified
+
+| What | State |
+|---|---|
+| Other platforms | The core is written for them (platform code is behind `_WIN32` / POSIX: module loading, the audio device) and `CMakeLists.txt` builds it, but it has only been built and run on Windows x64 with MSVC. Linux and macOS builds are unverified; off Windows the audio device is the null device (audio is mixed on request). |
+| Absentialis on the native services | Absentialis uses the native world (owned by the engine), routes, sight and meshing, and - with `ABS_NATIVE_RENDER=1` - the native renderer. Its characters, ragdolls, cars, AI and audio still run on its Java implementations (now in `astratto.ai`, `astratto.audio` and the game's own packages); moving the game onto the native services is the game's work, not the engine's. The native renderer is not yet the game's default because a world that is not linked to the engine (the hideout preview) is still drawn by the game's Java renderer. |
+| Java GL code in the engine | `astratto.render` (Batch2D, Font, ModelRenderer, Shader, Screenshot) and the GL paths of Foliage, Decals and Props remain for Absentialis's Java renderer. The engine's own renderer and the starter game use none of them; they go when the game stops using its Java renderer, and `lwjgl-opengl` with them. |
+| Pixel parity | The native renderer was moved pass for pass; frames compared by eye and by mean difference in play (the `car` scenario), not gated pixel for pixel. |

@@ -31,6 +31,9 @@ import org.lwjgl.system.MemoryUtil;
  * Instances live in 16 m patches. What is drawn is whatever stands in the patches round the camera: one instanced draw
  * per model, into the G-buffer and - for whatever is within shadow distance - the first shadow cascades. Each instance
  * carries the baked light of the cell it stands in, asked of the {@link LightSource} whenever its patch is uploaded.
+ *
+ * 2.0: given the engine's renderer ({@link #initNative}), the models and instance lists go to it ({@code LAYER_PROP})
+ * and each frame is asked for with {@link #frame}.
  */
 public final class Props {
     public interface LightSource {
@@ -40,7 +43,7 @@ public final class Props {
 
     private static final int PATCH = 16, VF = 10, INST = 8;
 
-    private static final class Model { String name; float[] mesh; int vao, vbo, ibo, verts, cap, drawn; float height; boolean shadow = true; }
+    private static final class Model { String name; float[] mesh; int vao, vbo, ibo, verts, cap, drawn, nat; float height; boolean shadow = true; }
     /** One prop: where it stands, how it is turned, which model it is - and whether it is still there. */
     public static final class Instance { public int model, x, y, z, rot, id; public float ox, oy, oz, scale = 1; public boolean alive = true; }
 
@@ -54,6 +57,7 @@ public final class Props {
     public boolean enabled = true;
     private Shader gbuf, shadow;
     private boolean glReady, dirty = true;
+    private astratto.bridge.NativeRenderer nat;
     private int lastCX = Integer.MIN_VALUE, lastCZ, sinceRefresh;
     private FloatBuffer scratch;
     public int instances, drawCalls, triangles;
@@ -77,7 +81,8 @@ public final class Props {
         md.height = m.sy * voxelSize;
         models.add(md);
         byName.put(name, models.size() - 1);
-        if (glReady) upload(md);
+        if (nat != null) uploadNative(md);
+        else if (glReady) upload(md);
         return models.size() - 1;
     }
 
@@ -190,6 +195,25 @@ public final class Props {
         return java.util.Arrays.copyOf(out, o);
     }
 
+    // ------------------------------------------------------------------ 2.0: the engine's renderer
+    /** Hands every model to the engine's renderer; from now on it draws the props (see {@link #frame}). */
+    public void initNative(astratto.bridge.NativeRenderer r) {
+        nat = r;
+        if (scratch == null) scratch = MemoryUtil.memAllocFloat(INST * 2048);
+        for (Model md : models) uploadNative(md);
+        dirty = true;
+    }
+
+    private void uploadNative(Model md) {
+        if (md.nat != 0 || md.mesh == null) return;
+        md.nat = nat.layerMesh(astratto.bridge.AstrattoNative.LAYER_PROP, md.mesh, md.verts);
+    }
+
+    public boolean isNative() { return nat != null; }
+
+    /** This frame's props, for the engine's renderer. */
+    public void frame(astratto.bridge.RenderCommands c) { if (nat != null && enabled && instances > 0) c.props(drawDistance, shadowDistance); }
+
     // ------------------------------------------------------------------ GL
     public void init() {
         gbuf = new Shader(VS, FS_GBUF);
@@ -215,12 +239,11 @@ public final class Props {
         glVertexAttribPointer(4, 4, GL_FLOAT, false, INST * 4, 16); glEnableVertexAttribArray(4); glVertexAttribDivisor(4, 1);
         glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
-        md.mesh = null;
     }
 
     /** Rebuilds the instance lists when the camera has moved to another patch, something was added or removed, or the light may have changed. */
     public void update(float camX, float camZ) {
-        if (!glReady || !enabled) return;
+        if (!(glReady || nat != null) || !enabled) return;
         int ccx = (int) Math.floor(camX / PATCH), ccz = (int) Math.floor(camZ / PATCH);
         if (ccx != lastCX || ccz != lastCZ) { lastCX = ccx; lastCZ = ccz; dirty = true; }
         if (++sinceRefresh > 240) dirty = true;          // lamps come on and go off: the baked light is asked for again now and then
@@ -246,6 +269,7 @@ public final class Props {
             }
             md.drawn = n;
             instances += n; triangles += n * md.verts / 3;
+            if (nat != null) { scratch.flip(); nat.instances(md.nat, scratch, n, md.shadow ? astratto.bridge.AstrattoNative.INSTANCES_SHADOW : 0); continue; }
             if (n == 0 || md.vao == 0) continue;
             scratch.flip();
             glBindBuffer(GL_ARRAY_BUFFER, md.ibo);
@@ -275,47 +299,9 @@ public final class Props {
         glBindVertexArray(0);
     }
 
-    private static final String VS = """
-        #version 450 core
-        layout(location=0) in vec3 aPos;
-        layout(location=1) in vec3 aNormal;
-        layout(location=2) in vec4 aCol;
-        layout(location=3) in vec4 iPosScale;
-        layout(location=4) in vec4 iRot;       // turn, sky light, block light, -
-        uniform mat4 uPV;
-        uniform vec3 uCam;
-        uniform float uDist;
-        out vec4 vCol;
-        out vec3 vN;
-        out vec2 vLight;
-        void main() {
-            float c = cos(iRot.x), s = sin(iRot.x);
-            vec3 lp = aPos * iPosScale.w;
-            vec3 p = vec3(lp.x * c + lp.z * s, lp.y, -lp.x * s + lp.z * c);
-            vN = vec3(aNormal.x * c + aNormal.z * s, aNormal.y, -aNormal.x * s + aNormal.z * c);
-            vCol = aCol;
-            vLight = iRot.yz;
-            vec3 w = iPosScale.xyz + p;
-            // past the drawn distance the instance is collapsed to nothing (it is still in the list: lists follow patches, not metres)
-            if (length(iPosScale.xz - uCam.xz) > uDist) w = iPosScale.xyz;
-            gl_Position = uPV * vec4(w, 1.0);
-        }
-        """;
+    private static final String VS = astratto.render.Shaders.source("props.vert");
 
-    private static final String FS_GBUF = """
-        #version 450 core
-        in vec4 vCol;
-        in vec3 vN;
-        in vec2 vLight;
-        layout(location=0) out vec4 oAlbedo;
-        layout(location=1) out vec4 oNormal;
-        layout(location=2) out vec4 oMat;
-        void main() {
-            oAlbedo = vec4(vCol.rgb, vCol.a);
-            oNormal = vec4(normalize(vN) * 0.5 + 0.5, 0.0);
-            oMat = vec4(0.78, 0.0, 1.0, (floor(vLight.x * 15.0 + 0.5) * 16.0 + floor(vLight.y * 15.0 + 0.5)) / 255.0);
-        }
-        """;
+    private static final String FS_GBUF = astratto.render.Shaders.source("props_gbuffer.frag");
 
-    private static final String FS_SHADOW = "#version 450 core\nin vec4 vCol;\nin vec3 vN;\nin vec2 vLight;\nvoid main() {}\n";
+    private static final String FS_SHADOW = astratto.render.Shaders.source("props_shadow.frag");
 }

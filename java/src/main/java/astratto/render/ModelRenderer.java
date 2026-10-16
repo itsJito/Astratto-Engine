@@ -27,7 +27,17 @@ public final class ModelRenderer {
         public boolean translucent;
         /** When this mesh was last asked for (milliseconds): what the cache evicts by. */
         long used;
+        /** 2.0: the vertex data, kept while {@link #keepVertices} is on (the native renderer is given each mesh once, by this). */
+        public float[] vertices;
+        /** 2.0: the native renderer's id for this mesh (0 until it has been given it). */
+        public int nativeId;
+        public int count() { return count; }
     }
+
+    /** 2.0: keep each mesh's vertices on the CPU as well - set while the native renderer draws (it is handed them once). */
+    public static volatile boolean keepVertices;
+    /** 2.0: told of every mesh whose GL buffers are deleted (the native renderer lets its copy go too). */
+    public static volatile java.util.function.Consumer<Mesh> onDelete;
 
     /**
      * 0.7: how many meshes the cache holds before it starts letting go of the ones nobody has drawn lately, and how
@@ -52,7 +62,13 @@ public final class ModelRenderer {
     /** Start of a frame: the clock the cache ages by moves on, and meshes retired a moment ago are finally deleted. */
     public void frameStart() {
         now = System.nanoTime() / 1_000_000L;
-        while (!graveyard.isEmpty() && now - graveTime.peekFirst() > GRAVE_MS) { graveTime.pollFirst(); Mesh m = graveyard.pollFirst(); glDeleteBuffers(m.vbo); glDeleteVertexArrays(m.vao); }
+        while (!graveyard.isEmpty() && now - graveTime.peekFirst() > GRAVE_MS) {
+            graveTime.pollFirst();
+            Mesh m = graveyard.pollFirst();
+            glDeleteBuffers(m.vbo); glDeleteVertexArrays(m.vao);
+            java.util.function.Consumer<Mesh> d = onDelete;
+            if (d != null && m.nativeId != 0) d.accept(m);
+        }
     }
 
     /** Lets go of meshes nothing has asked for in a while. Never touches one used recently, so never one in the frame being built. */
@@ -244,6 +260,7 @@ public final class ModelRenderer {
         glEnableVertexAttribArray(2);
         glBindVertexArray(0);
         me.count = vertexCount;
+        if (keepVertices) me.vertices = java.util.Arrays.copyOf(verts, vertexCount * 10);
         MemoryUtil.memFree(fb);
         return me;
     }
@@ -312,33 +329,6 @@ public final class ModelRenderer {
         glDrawArrays(GL_TRIANGLES, 0, m.count);
     }
 
-    private static final String VS = """
-        #version 330 core
-        layout(location=0) in vec3 aPos;
-        layout(location=1) in vec4 aCol;
-        layout(location=2) in vec3 aNormal;
-        uniform mat4 uPV, uModel;
-        out vec4 vCol; out vec3 vWorld;
-        void main() {
-            vec4 w = uModel * vec4(aPos, 1.0);
-            vWorld = w.xyz;
-            // baked face shading by the model-space face direction: top brightest, underside darkest
-            float shade = aNormal.y > 0.5 ? 1.0 : aNormal.y < -0.5 ? 0.55 : abs(aNormal.x) > 0.5 ? 0.80 : aNormal.z > 0.5 ? 0.90 : 0.70;
-            vCol = vec4(aCol.rgb * shade, aCol.a);
-            gl_Position = uPV * w;
-        }
-        """;
-    private static final String FS = """
-        #version 330 core
-        in vec4 vCol; in vec3 vWorld;
-        uniform vec3 uFog, uCam; uniform float uFogDensity, uLight, uEmissive; uniform vec4 uTint;
-        out vec4 frag;
-        void main() {
-            vec3 c = vCol.rgb * uTint.rgb * mix(uLight, 1.4, uEmissive);
-            float d = length(vWorld - uCam);
-            float f = clamp(1.0 - exp(-pow(d * uFogDensity, 1.35)), 0.0, 1.0);
-            frag = vec4(mix(c, uFog, f * (1.0 - uEmissive * 0.5)), vCol.a * uTint.a);
-            if (frag.a < 0.02) discard;
-        }
-        """;
+    private static final String VS = astratto.render.Shaders.source("model_simple.vert");
+    private static final String FS = astratto.render.Shaders.source("model_simple.frag");
 }

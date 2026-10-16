@@ -65,6 +65,8 @@ public:
     /** A change made in play: relights round the cell when its light changed, and marks the columns the renderer must redo. */
     bool set(int x, int y, int z, int id);
     void fill(int x0, int y0, int z0, int x1, int y1, int z1, int id);
+    /** A whole column of cells, set raw (generators build a world a column at a time). False outside the world. */
+    bool setColumn(int x, int z, const uint8_t* cells);
     void clear();
 
     /** Light: every cell, or a box of columns and fifteen cells round it (light carries fifteen). */

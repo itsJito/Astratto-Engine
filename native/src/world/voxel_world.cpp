@@ -79,6 +79,20 @@ void VoxelWorld::fill(int x0, int y0, int z0, int x1, int y1, int z1, int id) {
     if (nav) navVersion_++;
 }
 
+bool VoxelWorld::setColumn(int x, int z, const uint8_t* cells) {
+    if (x < 0 || z < 0 || x >= sx_ || z >= sz_) return false;
+    uint8_t* col = blocks_.data() + index(x, 0, z);
+    bool nav = false;
+    for (int y = 0; y < sy_; y++) {
+        if (col[y] == cells[y]) continue;
+        nav |= ((table_->defs[col[y]].flags ^ table_->defs[cells[y]].flags) & (ASTRATTO_BLOCK_SOLID | ASTRATTO_BLOCK_DOOR)) != 0;
+        col[y] = cells[y];
+    }
+    edits_++;
+    if (nav) navVersion_++;
+    return true;
+}
+
 void VoxelWorld::clear() {
     std::fill(blocks_.begin(), blocks_.end(), 0);
     std::fill(light_.begin(), light_.end(), 0);

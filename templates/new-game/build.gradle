@@ -1,0 +1,37 @@
+// The starter game: Java gameplay over the Astratto Engine's native core.
+//   ./gradlew run          play it
+//   ./gradlew acceptance   run it off-screen for 600 frames with Java fallbacks disabled and check every service
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+dependencies {
+    // the engine: its Java library, with its native core, shaders and resources inside the jar
+    implementation 'astratto:theastrattoengine:2.0.0'
+}
+
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
+application {
+    mainClass = 'starter.StarterGame'
+    applicationDefaultJvmArgs = ['--enable-native-access=ALL-UNNAMED']
+}
+
+tasks.register('acceptance', JavaExec) {
+    group = 'verification'
+    description = 'Runs the starter game off-screen with no Java fallbacks and checks rendering, physics, AI, audio and modules.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = application.mainClass
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    environment 'ASTRATTO_JAVA_FALLBACK', '0'
+    environment 'ASTRATTO_NOVSYNC', '1'
+    args '--frames', '600', '--hidden', '--check', '--shot', layout.buildDirectory.file('acceptance.png').get().asFile.absolutePath
+}

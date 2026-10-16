@@ -1,0 +1,124 @@
+#include "include/head.glsl"
+#include "include/voxel.glsl"
+layout(local_size_x = 64) in;
+layout(rgba16f, binding = 0) uniform image3D imgR;
+layout(rgba16f, binding = 1) uniform image3D imgG;
+layout(rgba16f, binding = 2) uniform image3D imgB;
+layout(rgba16f, binding = 3) uniform image3D imgVis;
+layout(rgba8, binding = 4) uniform image3D imgMeta;
+uniform sampler3D uProbeR, uProbeG, uProbeB;
+uniform sampler2D uPalette;             // row 0: albedo; row 1: emitted radiance
+uniform ivec2 uRegions[48];
+uniform float uRegionBlend[48];
+uniform int uRegionCount, uRays;
+uniform mat3 uRot;
+uniform vec3 uSunDir, uSunCol, uSkyZenith, uSkyHorizon;
+const ivec3 PD = ivec3(WORLD_X / 4, WORLD_Y / 4, WORLD_Z / 4);
+const float PSP = 4.0;
+const float MAXT = 40.0;
+
+vec3 skyRadiance(vec3 d) { return d.y > 0.0 ? mix(uSkyHorizon, uSkyZenith, smoothstep(0.0, 0.5, d.y)) : uSkyHorizon * mix(1.0, 0.25, smoothstep(0.0, 0.3, -d.y)); }
+
+/** True when nothing opaque stands between a point and the sky along the sun direction. */
+bool sunVisible(vec3 a) {
+    vec3 d = uSunDir;
+    ivec3 c = ivec3(floor(a));
+    ivec3 st = ivec3(sign(d));
+    vec3 inv = 1.0 / max(abs(d), vec3(1e-5));
+    vec3 tm = ddaStart(a, d, c, inv);
+    for (int i = 0; i < 48; i++) {
+        if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; tm.x += inv.x; }
+        else if (tm.y < tm.z) { c.y += st.y; tm.y += inv.y; }
+        else { c.z += st.z; tm.z += inv.z; }
+        if (c.y >= WORLD.y || !inWorld(c)) return true;
+        if (opq(voxel(c))) return false;
+    }
+    return true;
+}
+
+vec3 bounce(vec3 p, vec3 n) {
+    vec3 uvw = (p + n * 1.2) / (vec3(PD) * PSP);
+    vec4 r = texture(uProbeR, uvw), g = texture(uProbeG, uvw), b = texture(uProbeB, uvw);
+    return max(vec3(r.x + dot(r.yzw, n), g.x + dot(g.yzw, n), b.x + dot(b.yzw, n)), vec3(0.0));
+}
+
+/** One ray: radiance arriving at the probe from direction d, and how far the ray flew. */
+vec3 trace(vec3 o, vec3 d, out float dist) {
+    ivec3 c = ivec3(floor(o));
+    ivec3 st = ivec3(sign(d));
+    vec3 inv = 1.0 / max(abs(d), vec3(1e-5));
+    vec3 tm = ddaStart(o, d, c, inv);
+    float t = 0.0;
+    vec3 n = vec3(0.0), through = vec3(0.0);
+    for (int i = 0; i < 64; i++) {
+        if (tm.x < tm.y && tm.x < tm.z) { t = tm.x; c.x += st.x; tm.x += inv.x; n = vec3(-st.x, 0, 0); }
+        else if (tm.y < tm.z) { t = tm.y; c.y += st.y; tm.y += inv.y; n = vec3(0, -st.y, 0); }
+        else { t = tm.z; c.z += st.z; tm.z += inv.z; n = vec3(0, 0, -st.z); }
+        if (t > MAXT || !inWorld(c)) break;
+        uint id = voxel(c);
+        if (id == 0u) continue;
+        vec3 emit = texelFetch(uPalette, ivec2(int(id), 1), 0).rgb;
+        if (!opq(id)) { through += emit * 0.5; continue; }       // lamps, screens, embers: light sources you can see past
+        vec3 albedo = texelFetch(uPalette, ivec2(int(id), 0), 0).rgb;
+        vec3 hp = o + d * t + n * 0.5;
+        vec3 lit = bounce(hp, n);
+        float ndl = dot(n, uSunDir);
+        if (ndl > 0.0 && dot(uSunCol, vec3(1.0)) > 1e-4 && sunVisible(hp)) lit += uSunCol * ndl;
+        dist = t;
+        return albedo * lit + emit + through;
+    }
+    dist = MAXT;
+    return skyRadiance(d) + through;
+}
+
+void main() {
+    int job = int(gl_GlobalInvocationID.x);
+    int region = job / 384, local = job % 384;
+    if (region >= uRegionCount) return;
+    ivec3 pc = ivec3(uRegions[region].x * 4 + (local & 3), local >> 4, uRegions[region].y * 4 + ((local >> 2) & 3));
+    if (any(greaterThanEqual(pc, PD))) return;
+    // ---- adaptive placement: a probe buried in a wall is moved into the nearest open cell, or switched off
+    vec3 base = (vec3(pc) + 0.5) * PSP;
+    const vec3 OFF[15] = vec3[](vec3(0), vec3(1.4, 0, 0), vec3(-1.4, 0, 0), vec3(0, 0, 1.4), vec3(0, 0, -1.4), vec3(0, 1.4, 0), vec3(0, -1.4, 0),
+            vec3(1.4, 0, 1.4), vec3(-1.4, 0, 1.4), vec3(1.4, 0, -1.4), vec3(-1.4, 0, -1.4), vec3(1.4, 1.4, 0), vec3(-1.4, 1.4, 0), vec3(0, 1.4, 1.4), vec3(0, 1.4, -1.4));
+    vec3 off = vec3(0.0);
+    bool valid = false;
+    for (int i = 0; i < 15; i++) {
+        ivec3 c = ivec3(floor(base + OFF[i]));
+        if (inWorld(c) && !opq(voxel(c))) { off = OFF[i]; valid = true; break; }
+    }
+    if (!valid) {
+        imageStore(imgMeta, pc, vec4(0.5, 0.5, 0.5, 0.0));
+        imageStore(imgR, pc, vec4(0.0)); imageStore(imgG, pc, vec4(0.0)); imageStore(imgB, pc, vec4(0.0));
+        imageStore(imgVis, pc, vec4(-1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    vec3 o = floor(base + off) + 0.5;      // the centre of the open cell
+    off = o - base;
+    // ---- gather
+    vec3 a0 = vec3(0.0), ax = vec3(0.0), ay = vec3(0.0), az = vec3(0.0);
+    float d0 = 0.0;
+    vec3 d1 = vec3(0.0);
+    float fn = float(uRays);
+    for (int i = 0; i < uRays; i++) {
+        float z = 1.0 - (2.0 * float(i) + 1.0) / fn;
+        float r = sqrt(max(0.0, 1.0 - z * z)), phi = float(i) * 2.39996323;
+        vec3 d = uRot * vec3(cos(phi) * r, sin(phi) * r, z);
+        float dist;
+        vec3 L = min(trace(o, d, dist), vec3(24.0));
+        a0 += L; ax += L * d.x; ay += L * d.y; az += L * d.z;
+        d0 += dist; d1 += dist * d;
+    }
+    a0 /= fn; ax *= 2.0 / fn; ay *= 2.0 / fn; az *= 2.0 / fn;
+    d0 /= fn; d1 *= 3.0 / fn;
+    float k = uRegionBlend[region];
+    vec4 nr = vec4(a0.r, ax.r, ay.r, az.r), ng = vec4(a0.g, ax.g, ay.g, az.g), nb = vec4(a0.b, ax.b, ay.b, az.b), nv = vec4(d0, d1);
+    if (k < 1.0 && imageLoad(imgMeta, pc).a > 0.5) {
+        nr = mix(imageLoad(imgR, pc), nr, k); ng = mix(imageLoad(imgG, pc), ng, k); nb = mix(imageLoad(imgB, pc), nb, k);
+        vec4 ov = imageLoad(imgVis, pc);
+        if (ov.x >= 0.0) nv = mix(ov, nv, max(k, 0.5));
+    }
+    imageStore(imgR, pc, nr); imageStore(imgG, pc, ng); imageStore(imgB, pc, nb);
+    imageStore(imgVis, pc, nv);
+    imageStore(imgMeta, pc, vec4(off / PSP + 0.5, 1.0));
+}

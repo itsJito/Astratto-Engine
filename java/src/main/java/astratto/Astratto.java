@@ -4,14 +4,11 @@ import astratto.render.Batch2D;
 import astratto.render.Vector2D;
 
 /**
- * The Astratto Engine (0.8): the technology Absentialis is built on, named and kept apart from the game so that it
- * outlives it. Everything under {@code absentialis.engine} (window and input, the hybrid GI renderer, voxel models,
- * the event bus, UltraEngine audio), the NeuralAI engine ({@code absentialis.neuralai}) and the Sydney Engine
- * ({@code absentialis.sydney}) belong to it; nothing in those packages names a place, a faction or an item of the
- * game. The game is what is built with it: {@code scene}, {@code gameplay}, {@code world}, {@code sim}, {@code rivalry}.
- *
- * 1.2: the engine has a native core as well ({@code astratto/native}, C++) and a bridge to it ({@code astratto.bridge});
- * how the two halves are divided, and what has crossed so far, is in {@code astratto/ARCHITECTURE.md}.
+ * The Astratto Engine: a voxel game engine with a native core (C++17, {@code native/}) that owns the world, rendering,
+ * physics (Sydney's ragdolls, characters and cars), AI (NeuralAI's perception, routes and decisions) and audio
+ * (UltraEngine's mixer), and a Java library ({@code astratto.*}) that binds it ({@code astratto.bridge}), runs a game's
+ * modules round its tick ({@code astratto.game}) and carries the reusable Java systems (window and input, 2D, models,
+ * events). Nothing in it names a game. How it is divided, and why, is in {@code docs/ARCHITECTURE.md}.
  *
  * Copyright Astratto North of LudusValley Recreations, under VEIN Enterprises.
  */
@@ -21,7 +18,25 @@ public final class Astratto {
     public static final String NAME = "Astratto Engine";
     public static final String SHORT = "ASTRATTO";
     /** The engine's own version: it moves when the engine does, not when the game ships a build. */
-    public static final String VERSION = "1.3";
+    public static final String VERSION = "2.0";
+
+    /**
+     * Whether a caller may fall back to a Java implementation when a native service is not there. Set
+     * {@code ASTRATTO_JAVA_FALLBACK=0} (or {@code -Dastratto.javaFallback=false}) and the engine's factories
+     * ({@code NativeEngine.create}, {@code NativeRenderer.create}, {@code NativeMesher.create}) throw instead of returning
+     * null: a run that passes is then known to have used the native core for everything.
+     */
+    public static boolean javaFallbackAllowed() {
+        String p = System.getProperty("astratto.javaFallback");
+        if (p != null) return !p.equalsIgnoreCase("false") && !p.equals("0");
+        return !"0".equals(System.getenv("ASTRATTO_JAVA_FALLBACK"));
+    }
+
+    /** Returns null, or throws when Java fallbacks are disabled ({@link #javaFallbackAllowed}): what was not native, and why. */
+    public static <T> T noNative(String what, String why) {
+        if (javaFallbackAllowed()) return null;
+        throw new IllegalStateException("Astratto: " + what + " is not available natively (" + why + ") and Java fallbacks are disabled (ASTRATTO_JAVA_FALLBACK=0)");
+    }
     public static final String COPYRIGHT = "Astratto North of LudusValley Recreations, under VEIN Enterprises";
     public static final String NOTICE = "Copyright (c) " + COPYRIGHT;
     /** The systems that make it up, as they are credited. */

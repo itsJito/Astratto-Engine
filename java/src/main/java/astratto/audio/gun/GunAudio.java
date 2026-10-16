@@ -99,7 +99,7 @@ public final class GunAudio {
                 p.gain = Math.max(p.gain * 0.5f, Math.min(p.gain * 2.2f, p.gain * k));
             }
             heardLevel.put(p.weaponId, heard(library, p.weaponId));
-            if (System.getenv("ABS_GUNDEBUG") != null) System.out.println("[gundebug] " + p.weaponId + " want " + want + " got " + heardLevel.get(p.weaponId) + " gain " + p.gain + " norm " + p.norm + " measured " + p.measured + " punch " + p.punch.size());
+            if (System.getenv("ASTRATTO_GUNDEBUG") != null) System.out.println("[gundebug] " + p.weaponId + " want " + want + " got " + heardLevel.get(p.weaponId) + " gain " + p.gain + " norm " + p.norm + " measured " + p.measured + " punch " + p.punch.size());
         }
     }
 

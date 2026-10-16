@@ -124,6 +124,9 @@ public final class WeaponAudioProfile {
 
     private static float f(Map<String, Object> m, Map<String, Object> def, String k, float d) { return (float) Json.num(m, k, Json.num(def, k, d)); }
 
+    /** The classpath resource (JSON) the game's weapon sound profiles are read from; set by the game before the first {@link #load}. */
+    public static volatile String resource;
+
     /** Loads profiles and every recorded ingredient they refer to. Missing assets are reported, never silently replaced. */
     @SuppressWarnings("unchecked")
     /** packWeapons: the close recordings a game supplies per weapon ({"weapon": {"shot": [stems], "suppressed": [stems]}}), looked up in assets/pack. */
@@ -131,8 +134,9 @@ public final class WeaponAudioProfile {
         if (packWeapons == null) packWeapons = new java.util.LinkedHashMap<>();
         Library lib = new Library();
         Map<String, Object> root;
-        try (InputStream in = WeaponAudioProfile.class.getResourceAsStream("/content/weapon_audio.json")) {
-            if (in == null) { lib.problems.add("content/weapon_audio.json missing"); return lib; }
+        if (resource == null) { lib.problems.add("no weapon sound profiles named (WeaponAudioProfile.resource)"); return lib; }
+        try (InputStream in = WeaponAudioProfile.class.getResourceAsStream(resource)) {
+            if (in == null) { lib.problems.add(resource + " missing"); return lib; }
             root = Json.parseObject(new String(in.readAllBytes(), StandardCharsets.UTF_8));
         } catch (Exception e) { lib.problems.add("weapon_audio.json: " + e); return lib; }
         Map<String, Object> def = Json.obj(root, "defaults"), sup = Json.obj(root, "suppressed"), actions = Json.obj(root, "actions");

@@ -36,6 +36,9 @@ import org.lwjgl.system.MemoryUtil;
  *
  * <b>Dynamic decals</b> ({@link #add}) live in a ring: the oldest gives way to the newest, and each fades out over the
  * last part of its life - nothing left by a fight stays for ever.
+ *
+ * <b>2.0: native drawing.</b> Given the engine's renderer ({@link #initNative}), the patches' meshes and the decal texture
+ * array go to it ({@code LAYER_DECAL}), and each frame - with that frame's marks - is asked for with {@link #frame}.
  */
 public final class Decals {
     public interface Source {
@@ -65,7 +68,7 @@ public final class Decals {
 
     private static final int PATCH = 16, VF = 10, MAX_DYNAMIC = 640;
 
-    private static final class Patch { int version, vao, vbo, verts; boolean built; float[] data; int n; }
+    private static final class Patch { int version, vao, vbo, verts, nat; boolean built; float[] data; int n; }
 
     private Source src;
     private Patch[] patches;
@@ -78,6 +81,10 @@ public final class Decals {
     public int atlasTex;
     public int linings;
     private boolean glReady;
+    // ---- 2.0: the engine's renderer, when it draws the decals instead, and its id for the decal texture array
+    private astratto.bridge.NativeRenderer nat;
+    private int natTex;
+    private float[] natDyn = new float[0];
     private final float[] scratch = new float[VF * 6];
     private float[] buildBuf = new float[VF * 6 * 256];
     private int buildN;
@@ -94,6 +101,7 @@ public final class Decals {
 
     public void attach(Source s) {
         if (patches != null && glReady) for (Patch p : patches) if (p != null && p.vao != 0) { glDeleteVertexArrays(p.vao); glDeleteBuffers(p.vbo); }
+        if (patches != null && nat != null) for (Patch p : patches) if (p != null && p.nat != 0) nat.release(astratto.bridge.AstrattoNative.RES_MESH, p.nat);
         src = s;
         pw = (s.width() + PATCH - 1) / PATCH; pd = (s.depth() + PATCH - 1) / PATCH;
         patches = new Patch[pw * pd];
@@ -205,12 +213,12 @@ public final class Decals {
                 boolean wallish = k == Source.MASONRY || k == Source.METAL || k == Source.WOOD;
                 if (k == Source.WINDOW) continue;
                 // 1.0: a ceiling of its own - the underside of this block, where it is over a finished room
-                if (atlasTex != 0 && y > 1 && src.open(x, y - 1, z)) { int cl = src.lining(x, y, z, 4); if (cl >= 0) { ceilQuad(x, y, z, -(cl + 1)); linings++; } }
+                if ((atlasTex != 0 || nat != null) && y > 1 && src.open(x, y - 1, z)) { int cl = src.lining(x, y, z, 4); if (cl >= 0) { ceilQuad(x, y, z, -(cl + 1)); linings++; } }
                 for (int d = 0; d < 4; d++) {
                     int nx = x + DIRS[d][0], nz = z + DIRS[d][2];
                     if (!src.open(nx, y, nz)) continue;
                     // a lining first: whatever else lies on this face lies on top of it
-                    int ln = atlasTex != 0 ? src.lining(x, y, z, d) : -1;
+                    int ln = atlasTex != 0 || nat != null ? src.lining(x, y, z, d) : -1;
                     if (ln >= 0) { wallQuad(x, y, y, z, d, -(ln + 1), false, 1f); linings++; }
                     if (!wallish) continue;
                     boolean outdoors = src.skyLight(nx, y, nz) >= 12;
@@ -251,7 +259,15 @@ public final class Decals {
         p.data = java.util.Arrays.copyOf(buildBuf, buildN);
         p.built = true;
         patchesBuilt++;
-        if (glReady) uploadPatch(p);
+        if (nat != null) uploadNative(p);
+        else if (glReady) uploadPatch(p);
+    }
+
+    private void uploadNative(Patch p) {
+        if (p.nat != 0) nat.release(astratto.bridge.AstrattoNative.RES_MESH, p.nat);
+        p.nat = p.n > 0 ? nat.layerMesh(astratto.bridge.AstrattoNative.LAYER_DECAL, p.data, p.n) : 0;
+        p.verts = p.n;
+        p.data = null;
     }
 
     private void uploadPatch(Patch p) {
@@ -317,6 +333,51 @@ public final class Decals {
 
     public int dynamicCount() { int n = 0; for (int i = 0; i < MAX_DYNAMIC; i++) if (dynLife[i] > 0 && time - dynBorn[i] < dynLife[i]) n++; return n; }
     public void clearDynamic() { java.util.Arrays.fill(dynLife, 0); dynLive = 0; }
+
+    // ------------------------------------------------------------------ 2.0: the engine's renderer
+    /** Hands the decal pictures (and every patch laid out so far) to the engine's renderer; from now on it draws them (see {@link #frame}). */
+    public void initNative(astratto.bridge.NativeRenderer r) {
+        nat = r;
+        ByteBuffer buf = pictures();
+        try {
+            natTex = r.texture(astratto.bridge.AstrattoNative.TEX_ARRAY, DecalAtlas.N, DecalAtlas.N, DecalAtlas.LAYERS,
+                    astratto.bridge.AstrattoNative.TEX_MIPMAP | astratto.bridge.AstrattoNative.TEX_MIP_LINEAR, buf);
+        } finally { MemoryUtil.memFree(buf); }
+        // patches laid out so far: handed over as they are, or (given to the GL already) laid out again
+        if (patches != null) for (Patch p : patches) if (p != null && p.built) { if (p.data != null) uploadNative(p); else p.built = false; }
+    }
+
+    public boolean isNative() { return nat != null; }
+
+    /** Every decal picture, layer after layer, RGBA (native memory: the caller frees it). */
+    private static ByteBuffer pictures() {
+        ByteBuffer buf = MemoryUtil.memAlloc(DecalAtlas.N * DecalAtlas.N * 4 * DecalAtlas.LAYERS);
+        for (int k = 0; k < DecalAtlas.KINDS; k++) for (int v = 0; v < DecalAtlas.VARIANTS[k]; v++) {
+            int[] px = DecalAtlas.paint(k, v);
+            for (int c : px) buf.put((byte) (c >> 16)).put((byte) (c >> 8)).put((byte) c).put((byte) (c >>> 24));
+        }
+        buf.flip();
+        return buf;
+    }
+
+    /** This frame's decals, for the engine's renderer: the laid-out patches are its own; the marks of what has happened go with the frame, faded. */
+    public void frame(astratto.bridge.RenderCommands c) {
+        if (nat == null || !enabled || src == null) return;
+        int n = 0;
+        if (natDyn.length < MAX_DYNAMIC * 6 * VF) natDyn = new float[MAX_DYNAMIC * 6 * VF];
+        for (int i = 0; i < MAX_DYNAMIC; i++) {
+            if (dynLife[i] <= 0) continue;
+            float age = time - dynBorn[i];
+            if (age >= dynLife[i] || age < 0) { dynLife[i] = 0; continue; }
+            float fade = Math.min(1, (dynLife[i] - age) / (dynLife[i] * 0.25f));
+            int o = i * 6 * VF;
+            System.arraycopy(dyn, o, natDyn, n * 6 * VF, 6 * VF);
+            for (int v = 0; v < 6; v++) natDyn[n * 6 * VF + v * VF + VF - 1] *= fade;
+            n++;
+        }
+        dynamicQuads = n;
+        c.decals(natTex, 0, drawDistance * 0.75f, drawDistance, snow, natDyn, n * 6);
+    }
 
     // ------------------------------------------------------------------ GL
     public void init() {
@@ -426,41 +487,7 @@ public final class Decals {
         glEnable(GL_CULL_FACE);
     }
 
-    private static final String VS = """
-        #version 450 core
-        layout(location=0) in vec3 aPos;
-        layout(location=1) in vec3 aUVL;
-        layout(location=2) in vec4 aTint;
-        uniform mat4 uPV;
-        uniform vec3 uCam;
-        uniform vec2 uFade;
-        out vec3 vUVL;
-        out vec4 vTint;
-        out vec3 vWorld;
-        void main() {
-            vUVL = aUVL;
-            vWorld = aPos;
-            vTint = vec4(aTint.rgb, aTint.a * (1.0 - smoothstep(uFade.x, uFade.y, length(aPos - uCam))));
-            gl_Position = uPV * vec4(aPos, 1.0);
-        }
-        """;
+    private static final String VS = astratto.render.Shaders.source("decal.vert");
 
-    private static final String FS = """
-        #version 450 core
-        in vec3 vUVL;
-        in vec4 vTint;
-        in vec3 vWorld;
-        uniform sampler2DArray uTex, uAtlas;
-        uniform float uSnow;
-        layout(location=0) out vec4 oAlbedo;
-        void main() {
-            // a negative layer is a lining: a face of the world's own atlas, laid over the wall whole
-            vec4 t = vUVL.z < -0.5 ? vec4(texture(uAtlas, vec3(vUVL.xy, -vUVL.z - 1.0)).rgb, 1.0) : texture(uTex, vUVL);
-            float a = t.a * vTint.a;
-            // what lies on the ground is buried when it snows (a mark on a wall is not)
-            if (uSnow > 0.0 && abs(normalize(cross(dFdx(vWorld), dFdy(vWorld))).y) > 0.7) a *= 1.0 - smoothstep(0.15, 0.6, uSnow);
-            if (a < 0.02) discard;
-            oAlbedo = vec4(t.rgb * vTint.rgb, a);
-        }
-        """;
+    private static final String FS = astratto.render.Shaders.source("decal.frag");
 }

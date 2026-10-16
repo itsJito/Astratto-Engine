@@ -17,6 +17,10 @@ public final class Window {
     /** True when the context is OpenGL 4.5 core: the deferred hybrid-GI renderer can run. */
     public boolean gl45;
     public String glInfo = "";
+    /** Shown when made (false: an off-screen window for automated runs - it still has a full GL context). */
+    public boolean show = true;
+
+    private static boolean env(String name) { return System.getenv("ASTRATTO_" + name) != null || System.getenv("ABS_" + name) != null; }
 
     public void create(String title, int w, int h) {
         GLFWErrorCallback.createPrint(System.err).set();
@@ -35,7 +39,7 @@ public final class Window {
         // one, fall back to a 3.3 context: the game then runs on the legacy forward renderer.
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-        boolean forceLegacy = System.getenv("ABS_LEGACY_GL") != null;
+        boolean forceLegacy = env("LEGACY_GL");
         GLFWErrorCallback.createPrint(new java.io.PrintStream(java.io.OutputStream.nullOutputStream())).set();
         handle = forceLegacy ? NULL : glfwCreateWindow(w, h, title, NULL, NULL);
         GLFWErrorCallback.createPrint(System.err).set();
@@ -44,7 +48,7 @@ public final class Window {
             glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
             glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
             handle = glfwCreateWindow(w, h, title, NULL, NULL);
-            if (handle != NULL) System.err.println("[Boot] OpenGL 4.5 is not available" + (forceLegacy ? " (ABS_LEGACY_GL)" : "") + ": using the legacy forward renderer.");
+            if (handle != NULL) System.err.println("[Boot] OpenGL 4.5 is not available" + (forceLegacy ? " (LEGACY_GL)" : "") + ": using the legacy forward renderer.");
         }
         if (handle == NULL) throw new IllegalStateException("Window creation failed (OpenGL 3.3 or newer required)");
         width = w; height = h;
@@ -61,11 +65,11 @@ public final class Window {
         GL.createCapabilities();
         glInfo = glGetString(GL_RENDERER) + "  -  OpenGL " + glGetString(GL_VERSION);
         System.out.println("[Boot] " + glInfo);
-        glfwSwapInterval(System.getenv("ABS_NOVSYNC") != null ? 0 : 1);
+        glfwSwapInterval(env("NOVSYNC") ? 0 : 1);
         int[] fw = new int[1], fh = new int[1];
         glfwGetFramebufferSize(handle, fw, fh);
         width = fw[0]; height = fh[0];
-        glfwShowWindow(handle);
+        if (show) glfwShowWindow(handle);
         glClearColor(0.05f, 0.05f, 0.06f, 1);
     }
 

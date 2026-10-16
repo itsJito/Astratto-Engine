@@ -32,7 +32,7 @@ cl %FLAGS% /DASTRATTO_BUILD /LD %SRC% /Fo"%OBJ%\lib\\" /Fe"%OUT%\astratto.dll" /
 if errorlevel 1 ( echo astratto: the library did not build & exit /b 1 )
 del /q "%OUT%\astratto.exp" 2>nul
 
-cl %FLAGS% "%HERE%tests\selftest.cpp" /Fo"%OBJ%\test\\" /Fe"%OUT%\astratto_selftest.exe" /link "%OBJ%\astratto.lib"
+cl %FLAGS% "%HERE%tests\selftest.cpp" "%HERE%tests\services.cpp" /Fo"%OBJ%\test\\" /Fe"%OUT%\astratto_selftest.exe" /link "%OBJ%\astratto.lib"
 if errorlevel 1 ( echo astratto: the self-test did not build & exit /b 1 )
 
 rem the example gameplay module a game can copy: a DLL the engine loads (see include\astratto\astratto_module.h)

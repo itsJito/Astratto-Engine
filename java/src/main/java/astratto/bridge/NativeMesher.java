@@ -5,7 +5,7 @@ import java.nio.ByteOrder;
 import org.lwjgl.system.MemoryUtil;
 
 /**
- * 1.3, Astratto Engine stage 2 (rendering): the native chunk mesher, held from Java. One per meshing thread: it is made
+ * Astratto Engine (rendering): the native chunk mesher, held from Java. One per meshing thread: it is made
  * from a render table (what each kind of block looks like to the mesher, the shapes and their boxes) and then turns
  * columns of cells into vertex streams, with no engine and no world of its own. See {@code astratto.h}, "rendering".
  *
@@ -39,7 +39,16 @@ public final class NativeMesher implements AutoCloseable {
 
     /** A mesher, or null when there is no native core (or it would not take the table). */
     public static NativeMesher create(BlockDef[] blocks, ShapeDef[] shapes, int belowFloorBlock) {
-        if (!AstrattoNative.load()) return null;
+        if (!AstrattoNative.load()) return astratto.Astratto.noNative("the chunk mesher", AstrattoNative.reason());
+        long h = withTable(blocks, shapes, belowFloorBlock, AstrattoNative::mesherCreate);
+        return h == 0 ? astratto.Astratto.noNative("the chunk mesher", "a malformed render table") : new NativeMesher(h);
+    }
+
+    /**
+     * Lays a render table out in native memory ({@code astratto_render_table} and the arrays it points at), hands it to
+     * {@code use}, and frees it again: whatever takes a table (a mesher, the renderer's world look) copies it.
+     */
+    static long withTable(BlockDef[] blocks, ShapeDef[] shapes, int belowFloorBlock, java.util.function.ToLongFunction<ByteBuffer> use) {
         int boxCount = 0;
         for (ShapeDef s : shapes) if (s != null && s.boxes != null) boxCount += s.boxes.length;
         ByteBuffer rb = MemoryUtil.memCalloc(Math.max(1, blocks.length) * AstrattoNative.SIZEOF_RENDER_BLOCK).order(ByteOrder.nativeOrder());
@@ -66,10 +75,8 @@ public final class NativeMesher implements AutoCloseable {
             table.putInt(0, AstrattoNative.SIZEOF_RENDER_TABLE).putInt(4, blocks.length).putLong(8, MemoryUtil.memAddress(rb));
             table.putInt(16, shapes.length).putInt(20, boxCount).putLong(24, MemoryUtil.memAddress(sd)).putLong(32, MemoryUtil.memAddress(bx));
             table.putInt(40, belowFloorBlock);
-            long h = AstrattoNative.mesherCreate(table);
-            return h == 0 ? null : new NativeMesher(h);
+            return use.applyAsLong(table);
         } finally {
-            // the mesher copies its tables: nothing it was given is kept
             MemoryUtil.memFree(rb); MemoryUtil.memFree(sd); MemoryUtil.memFree(bx); MemoryUtil.memFree(table);
         }
     }

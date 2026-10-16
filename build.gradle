@@ -37,8 +37,8 @@ sourceSets {
         resources.srcDirs = ['java/src/main/resources', layout.buildDirectory.dir('generated/engine-resources')]
     }
     test {
-        java.srcDirs = ['java/src/test/java']
-        resources.srcDirs = ['java/src/test/resources']
+        java.srcDirs = ['tests/java']
+        resources.srcDirs = ['tests/resources']
     }
 }
 
@@ -48,7 +48,8 @@ dependencies {
     api 'org.lwjgl:lwjgl'
     api 'org.lwjgl:lwjgl-glfw'
     api 'org.lwjgl:lwjgl-stb'
-    // TEMPORARY (2.0 stage 1 only): the Java GL passes until the native renderer replaces them; removed with them
+    // the Java GL paths that a game's own Java renderer may still use (Absentialis's does); the engine's renderer and the
+    // starter game need none of them - this goes when no game uses them
     api 'org.lwjgl:lwjgl-opengl'
     runtimeOnly "org.lwjgl:lwjgl-opengl::$lwjglNatives"
     runtimeOnly "org.lwjgl:lwjgl::$lwjglNatives"
@@ -107,4 +108,37 @@ tasks.named('test') {
     environment 'ASTRATTO_JAVA_FALLBACK', '0'
     jvmArgs '--enable-native-access=ALL-UNNAMED'
     testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = false }
+}
+
+// ------------------------------------------------------------------ acceptance: the engine on its own
+// Copies this directory (sources only: no build output, no native binaries) to a fresh directory - by default
+// <tmp>/astratto-acceptance/theastrattoengine, or -PacceptanceDir=<dir> - and there: builds the native core from source,
+// builds and tests the engine (Java fallbacks disabled), and runs the starter game off-screen with all of its checks.
+def acceptanceRoot = providers.gradleProperty('acceptanceDir').map { new File(it) }
+        .orElse(providers.systemProperty('java.io.tmpdir').map { new File(it, 'astratto-acceptance/theastrattoengine') })
+// the copy's own wrapper, by its full path
+def wrapperIn = { File dir -> isWindows ? ['cmd', '/c', new File(dir, 'gradlew.bat').absolutePath] : ['sh', new File(dir, 'gradlew').absolutePath] }
+
+def acceptanceCopy = tasks.register('acceptanceCopy', Sync) {
+    group = 'verification'
+    description = 'Copies the engine sources to a fresh directory for the acceptance run.'
+    from(projectDir) {
+        exclude 'build/**', '.gradle/**', 'native/bin/**', 'native/obj/**', 'native/build-*/**', '**/.git/**', 'AstrattoEngine/**',
+                'templates/new-game/build/**', 'templates/new-game/.gradle/**'
+    }
+    into acceptanceRoot
+}
+def acceptanceEngine = tasks.register('acceptanceEngine', Exec) {
+    group = 'verification'
+    description = 'In the copy: builds the native core from source, then builds and tests the engine.'
+    dependsOn acceptanceCopy
+    workingDir acceptanceRoot
+    commandLine wrapperIn(acceptanceRoot.get()) + ['buildNative', 'build', '--no-daemon', '--console=plain']
+}
+tasks.register('acceptance', Exec) {
+    group = 'verification'
+    description = 'The split accepted: the engine copied to a new directory builds, passes its tests, and runs the starter game with native rendering, AI, physics and audio beside Java gameplay, with Java fallbacks disabled.'
+    dependsOn acceptanceEngine
+    workingDir acceptanceRoot.map { new File(it, 'templates/new-game') }
+    commandLine wrapperIn(new File(acceptanceRoot.get(), 'templates/new-game')) + ['acceptance', '--no-daemon', '--console=plain']
 }

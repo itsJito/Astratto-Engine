@@ -1,0 +1,9 @@
+// A new game on the Astratto Engine. The engine is included as a build of its own (a composite build) from the
+// directory named by the 'astratto.engine' property - by default the engine this template sits in (../..). Copy this
+// directory anywhere and point the property at your copy of theastrattoengine (gradle.properties, or -Pastratto.engine=).
+rootProject.name = 'new-game'
+
+def engine = providers.gradleProperty('astratto.engine').getOrElse('../..')
+if (!file("$engine/native/include/astratto/astratto.h").isFile())
+    throw new GradleException("the Astratto Engine is not at '$engine' (set astratto.engine in gradle.properties)")
+includeBuild(engine)

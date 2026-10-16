@@ -7,9 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Every number NeuralAI is tuned with, read from /content/neuralai.json (profiles, squad roles, search weights) with
- * the defaults below when the file or a key is missing. These are calibration values for this game - none of them is
- * a fact about any other.
+ * Every number NeuralAI is tuned with (profiles, squad roles, search weights), read from the classpath resource the
+ * game names with {@link #source} before first use, with the defaults below when there is none or a key is missing.
+ * The engine knows one profile, "default"; a game's file adds its own (one per faction, say).
  */
 public final class NeuralConfig {
     // ---- scheduling (ticks per second)
@@ -56,6 +56,10 @@ public final class NeuralConfig {
     public final Map<String, Map<String, Object>> bodies = new LinkedHashMap<>();
 
     private static NeuralConfig instance;
+    private static String resource;
+
+    /** The classpath resource (a JSON file) the game tunes NeuralAI with; null = the defaults only. Takes effect at the next {@link #get}. */
+    public static synchronized void source(String classpathResource) { resource = classpathResource; instance = null; }
 
     public static synchronized NeuralConfig get() {
         if (instance == null) instance = load();
@@ -73,14 +77,9 @@ public final class NeuralConfig {
     private static NeuralConfig load() {
         NeuralConfig c = new NeuralConfig();
         c.profiles.put("default", new Profile(0.5, 0.5, 0.5, 1, 0.35, false, 18));
-        c.profiles.put("military", new Profile(0.45, 0.65, 0.9, 1.0, 0.30, true, 22));
-        c.profiles.put("mercenaries", new Profile(0.6, 0.55, 0.95, 1.3, 0.22, true, 18));
-        c.profiles.put("raiders", new Profile(0.8, 0.25, 0.4, 0.5, 0.45, false, 11));
-        c.profiles.put("survivors", new Profile(0.25, 0.8, 0.5, 0.35, 0.55, false, 16));
-        c.profiles.put("player", new Profile(0.5, 0.6, 1.0, 0.8, 0.25, true, 16));
-        c.profiles.put("infected", new Profile(1.0, 0.0, 0.0, 0.25, 0.05, false, 1));
-        try (InputStream in = NeuralConfig.class.getResourceAsStream("/content/neuralai.json")) {
-            if (in == null) return c;
+        if (resource == null) return c;
+        try (InputStream in = NeuralConfig.class.getResourceAsStream(resource)) {
+            if (in == null) { System.err.println("[NeuralAI] " + resource + " not found: defaults only"); return c; }
             Map<String, Object> root = Json.parseObject(new String(in.readAllBytes(), StandardCharsets.UTF_8));
             for (Map.Entry<String, Object> e : Json.obj(root, "tuning").entrySet()) {
                 if (!(e.getValue() instanceof Number n)) continue;
