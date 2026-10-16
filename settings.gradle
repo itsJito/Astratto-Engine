@@ -1,0 +1,3 @@
+// The Astratto Engine builds on its own: copy this directory anywhere and run ./gradlew build.
+// A game includes it as a composite build (includeBuild) and depends on 'astratto:theastrattoengine'.
+rootProject.name = 'theastrattoengine'

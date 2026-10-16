@@ -1,0 +1,110 @@
+// The Astratto Engine: a Java library (java/) over a native core (native/, C++17), with its shaders (shaders/) and
+// resources (resources/) bundled into the jar. Nothing here names a game; a game depends on this build.
+//
+//   ./gradlew buildNative     builds the native core for this platform and runs its own self-test
+//   ./gradlew build           the jar (native library, shaders and resources inside), tests, API docs
+//   ./gradlew test            boundary, interoperability and integration tests (native required, no Java fallbacks)
+plugins {
+    id 'java-library'
+}
+
+group = 'astratto'
+version = '2.0.0'
+
+def lwjglVersion = '3.3.3'
+def osName = System.getProperty('os.name').toLowerCase()
+def archName = System.getProperty('os.arch').toLowerCase()
+def isWindows = osName.contains('win')
+def isMac = osName.contains('mac')
+def arch = (archName.contains('aarch64') || archName.contains('arm64')) ? 'arm64' : 'x64'
+// the directory name the native library is built into and bundled under: <os>-<arch>
+ext.astrattoPlatform = (isWindows ? 'windows' : isMac ? 'macos' : 'linux') + '-' + arch
+def lwjglNatives = isWindows ? 'natives-windows' : isMac ? (arch == 'arm64' ? 'natives-macos-arm64' : 'natives-macos') : (arch == 'arm64' ? 'natives-linux-arm64' : 'natives-linux')
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+sourceSets {
+    main {
+        java.srcDirs = ['java/src/main/java']
+        resources.srcDirs = ['java/src/main/resources', layout.buildDirectory.dir('generated/engine-resources')]
+    }
+    test {
+        java.srcDirs = ['java/src/test/java']
+        resources.srcDirs = ['java/src/test/resources']
+    }
+}
+
+dependencies {
+    api platform("org.lwjgl:lwjgl-bom:$lwjglVersion")
+    // the platform layer: a window, a GL context and input (GLFW); fonts (stb_truetype); the foreign-call layer the bindings use
+    api 'org.lwjgl:lwjgl'
+    api 'org.lwjgl:lwjgl-glfw'
+    api 'org.lwjgl:lwjgl-stb'
+    // TEMPORARY (2.0 stage 1 only): the Java GL passes until the native renderer replaces them; removed with them
+    api 'org.lwjgl:lwjgl-opengl'
+    runtimeOnly "org.lwjgl:lwjgl-opengl::$lwjglNatives"
+    runtimeOnly "org.lwjgl:lwjgl::$lwjglNatives"
+    runtimeOnly "org.lwjgl:lwjgl-glfw::$lwjglNatives"
+    runtimeOnly "org.lwjgl:lwjgl-stb::$lwjglNatives"
+    // UltraEngine's MP3 decoder (pure Java, LGPL 2.1 - see NOTICE.md). WAV and Ogg Vorbis need nothing extra.
+    implementation 'javazoom:jlayer:1.0.1'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    options.addStringOption('Xdoclint:none', '-quiet')
+    title = "Astratto Engine $version API"
+}
+
+// ------------------------------------------------------------------ the native core
+// Windows: native/build.bat (Visual C++, found with vswhere; no CMake needed). Elsewhere, or wherever CMake is on PATH: CMake.
+tasks.register('buildNative', Exec) {
+    group = 'build'
+    description = 'Builds the Astratto native core for this platform into native/bin/<platform> and runs its self-test.'
+    workingDir = projectDir
+    inputs.dir('native/src'); inputs.dir('native/include'); inputs.dir('native/tests'); inputs.dir('native/modules')
+    outputs.dir("native/bin/$astrattoPlatform")
+    if (isWindows) {
+        commandLine 'cmd', '/c', file('native/build.bat').absolutePath
+    } else {
+        commandLine 'sh', '-c', "cmake -S native -B native/build-$astrattoPlatform -DCMAKE_BUILD_TYPE=Release -DASTRATTO_PLATFORM=$astrattoPlatform && cmake --build native/build-$astrattoPlatform --config Release && native/bin/$astrattoPlatform/astratto_selftest"
+    }
+}
+
+// shaders, resources and the native library go into the jar, under astratto/
+def engineResources = tasks.register('engineResources', Sync) {
+    from('shaders') { into 'astratto/shaders' }
+    from('resources') { into 'astratto/resources' }
+    from("native/bin/$astrattoPlatform") { into "astratto/natives/$astrattoPlatform"; include '*.dll', '*.so', '*.dylib' }
+    from('NOTICE.md') { into 'astratto' }
+    from('LICENSE.md') { into 'astratto' }
+    into layout.buildDirectory.dir('generated/engine-resources')
+}
+tasks.named('processResources') { dependsOn engineResources }
+tasks.named('sourcesJar') { dependsOn engineResources }
+
+// a fresh checkout has no native library yet: the jar is not built without one
+tasks.named('engineResources') {
+    if (!file("native/bin/$astrattoPlatform").exists()) dependsOn 'buildNative'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    // the acceptance rule: everything the engine provides is native, with no Java fallback to hide behind
+    environment 'ASTRATTO_JAVA_FALLBACK', '0'
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = false }
+}
