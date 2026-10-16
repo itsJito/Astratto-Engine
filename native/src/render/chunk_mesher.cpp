@@ -4,6 +4,7 @@
 #include "render/chunk_mesher.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace astratto {
 
@@ -332,6 +333,22 @@ void ChunkMesher::putVertex(std::vector<uint8_t>& o, int x, int y, int z, int no
         static_cast<uint8_t>(s), static_cast<uint8_t>(t), static_cast<uint8_t>(layer & 255), static_cast<uint8_t>(((layer >> 8) & 3) | ((var - 1) << 2) | (flags << 4)),
         static_cast<uint8_t>(sky * 17), static_cast<uint8_t>(blk * 17), static_cast<uint8_t>(ao * 85), 0};
     o.insert(o.end(), d, d + 12);
+}
+
+void copyColumn(const VoxelWorld& w, int cx, int cz, std::vector<uint8_t>& cells, std::vector<uint8_t>& light) {
+    const int H = w.sizeY();
+    const size_t n = static_cast<size_t>(REG) * REG * static_cast<size_t>(H);
+    cells.assign(n, 0);
+    light.assign(n, 0xF0);
+    const uint8_t* b = w.blocks();
+    const uint8_t* l = w.light();
+    for (int lx = -1; lx <= 16; lx++) for (int lz = -1; lz <= 16; lz++) {
+        const int x = cx * 16 + lx, z = cz * 16 + lz;
+        if (x < 0 || z < 0 || x >= w.sizeX() || z >= w.sizeZ()) continue;
+        const size_t src = w.index(x, 0, z), dst = static_cast<size_t>(((lx + 1) * REG + (lz + 1))) * static_cast<size_t>(H);
+        std::memcpy(cells.data() + dst, b + src, static_cast<size_t>(H));
+        std::memcpy(light.data() + dst, l + src, static_cast<size_t>(H));
+    }
 }
 
 }  // namespace astratto
